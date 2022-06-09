@@ -115,7 +115,7 @@ user_proj_example mprj (
     .io_oeb(io_oeb),
 
     // IRQ
-    .user_irq(user_irq)
+    .irq(user_irq)
 );
 
 endmodule	// user_project_wrapper
