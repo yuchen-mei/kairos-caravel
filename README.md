@@ -7,6 +7,24 @@
 
 ## Please fill in your project documentation in this README.md file 
 
-Refer to [README](docs/source/quickstart.rst) for a quick start of how to use caravel_user_project
+# Kairos
 
-Refer to [README](docs/source/index.rst) for this sample project documentation. 
+## A Packed-SIMD Floating-Point Vector Accelerator
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Instruction Set](#isa)
+- [Hardware Architecture](#architecture)
+- [Metrics](#metrics)
+- [Contributors](#contributors)
+
+## Overview
+
+Kairos is built for Stanford EE 372 VLSI Design Project.
+
+## Instruction Set
+
+### Sample Instructions
+
+ 
