@@ -2,14 +2,16 @@
 
 # Setting paths
 top="user_proj_example"
-base_dir="/home/users/yuchenm/ee372/pd-v3-0607/accelerator"
+base_dir="/home/users/yuchenm/ee372/esekf-v2-20MHz/accelerator"
 build_target="build"
 
+# gds_path="$base_dir/$build_target/*-gdsmerge/design_merged.gds"
 gds_path="$base_dir/$build_target/*-signoff/outputs/design-merged.gds"
 lef_path="$base_dir/$build_target/*-signoff/outputs/design.lef"
 def_path="$base_dir/$build_target/*-signoff/outputs/design.def.gz"
 gl_path="$base_dir/$build_target/*-signoff/outputs/design.vcs.v"
-rtl_path="$base_dir/$build_target/6-rtl/outputs/design.v"
+rtl_path="/farmshare/scratch/users/yuchenm/kairos-caravel/verilog/rtl_kairos/kairos_top.v"
+# rtl_path="$base_dir/$build_target/6-rtl/outputs/design.v"
 spi_path="$base_dir/$build_target/*-gds2spice/outputs/design_extracted.spice"
 
 # Create file names
@@ -38,10 +40,10 @@ if [ -f $gl_file ]; then
       rm -rf $gl_file
       echo "Removed existing $gl_file"
 fi
-# if [ -f $rtl_file ]; then
-#       rm -rf $rtl_file
-#       echo "Removed existing $rtl_file"
-# fi
+if [ -f $rtl_file ]; then
+      rm -rf $rtl_file
+      echo "Removed existing $rtl_file"
+fi
 #if [ -f $spi_file ]; then
 #    rm -rf $spi_file
 #    echo "Removed existing $spi_file"
@@ -56,11 +58,13 @@ echo "Moving $def_path to $def_file"
 cp $def_path $def_file
 echo "Moving $gl_path to $gl_file"
 cp $gl_path $gl_file
-# echo "Moving $rtl_path to $rtl_file"
-# cp $rtl_path $rtl_file
+echo "Moving $rtl_path to $rtl_file"
+cp $rtl_path $rtl_file
 #echo "Moving $spi_path to $spi_file"
 #cp $spi_path $spi_file
 
 #unzip .gz files
 echo "gunzip $def_file"
 gunzip $def_file
+
+cp $base_dir/$build_target/7-sram/outputs/sky130_sram_1kbyte_1rw1r_32x256_8.lef /farmshare/scratch/users/yuchenm/kairos-caravel/lef/
