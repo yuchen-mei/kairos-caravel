@@ -140,7 +140,7 @@ module DW_fp_mac_DG_inst_pipe (
 		inst_b_reg <= inst_b;
 		inst_c_reg <= inst_c;
 		inst_DG_ctrl_reg <= inst_DG_ctrl;
-		z_inst_pipe1 <= z_inst_internal;
+		z_inst_pipe1 <= (status_inst_internal[2] ? 0 : z_inst_internal);
 		z_inst_pipe2 <= z_inst_pipe1;
 		z_inst_pipe3 <= z_inst_pipe2;
 		z_inst_pipe4 <= z_inst_pipe3;
@@ -563,7 +563,15 @@ module accelerator (
 	input_vld,
 	output_data,
 	output_rdy,
-	output_vld
+	output_vld,
+	wbs_debug,
+	wbs_fsm_start,
+	wbs_fsm_done,
+	wbs_mem_we,
+	wbs_mem_ren,
+	wbs_mem_addr,
+	wbs_mem_wdata,
+	wbs_mem_rdata
 );
 	parameter SIG_WIDTH = 23;
 	parameter EXP_WIDTH = 8;
@@ -585,6 +593,14 @@ module accelerator (
 	output wire [OUTPUT_FIFO_WIDTH - 1:0] output_data;
 	input wire output_rdy;
 	output wire output_vld;
+	input wire wbs_debug;
+	input wire wbs_fsm_start;
+	output wire wbs_fsm_done;
+	input wire wbs_mem_we;
+	input wire wbs_mem_ren;
+	input wire [11:0] wbs_mem_addr;
+	input wire [31:0] wbs_mem_wdata;
+	output wire [31:0] wbs_mem_rdata;
 	localparam DATA_WIDTH = (SIG_WIDTH + EXP_WIDTH) + 1;
 	localparam ADDR_WIDTH = 12;
 	wire [INPUT_FIFO_WIDTH - 1:0] input_fifo_dout;
@@ -609,39 +625,51 @@ module accelerator (
 	wire mat_inv_en;
 	wire mat_inv_vld;
 	wire mvp_core_en;
-	wire [11:0] mvp_mem_addr;
 	wire mvp_mem_we;
 	wire mvp_mem_ren;
+	wire [11:0] mvp_mem_addr;
 	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] mvp_mem_wdata;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] mvp_mem_rdata;
 	wire [2:0] width;
-	wire [INSTR_MEM_ADDR_WIDTH - 1:0] instr_mem_addr;
-	wire instr_mem_csb;
-	wire instr_mem_web;
-	wire [DATA_WIDTH - 1:0] instr_mem_wdata;
+	reg instr_mem_csb;
+	reg instr_mem_web;
+	reg [INSTR_MEM_ADDR_WIDTH - 1:0] instr_mem_addr;
+	reg [DATA_WIDTH - 1:0] instr_mem_wdata;
 	wire [DATA_WIDTH - 1:0] instr_mem_rdata;
 	wire [INSTR_MEM_ADDR_WIDTH - 1:0] pc;
 	wire [31:0] instr;
-	wire [DATA_MEM_ADDR_WIDTH - 1:0] data_mem_addr;
-	wire data_mem_csb;
-	wire data_mem_web;
-	wire [(DATAPATH / 32) - 1:0] data_mem_wmask0;
-	wire [DATAPATH - 1:0] data_mem_wdata;
+	reg data_mem_csb;
+	reg data_mem_web;
+	reg [(DATAPATH / 32) - 1:0] data_mem_wmask;
+	reg [DATA_MEM_ADDR_WIDTH - 1:0] data_mem_addr;
+	reg [DATAPATH - 1:0] data_mem_wdata;
 	wire [DATAPATH - 1:0] data_mem_rdata;
 	wire [DATAPATH - 1:0] output_wb_data;
+	reg mem_ctrl_we;
+	reg mem_ctrl_ren;
+	reg [11:0] mem_ctrl_addr;
+	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_ctrl_wdata;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_ctrl_rdata;
+	reg [2:0] mem_ctrl_width;
+	wire instr_mem_ctrl_csb;
+	wire instr_mem_ctrl_web;
+	wire [INSTR_MEM_ADDR_WIDTH - 1:0] instr_mem_ctrl_addr;
+	wire [DATA_WIDTH - 1:0] instr_mem_ctrl_wdata;
+	wire data_mem_ctrl_csb;
+	wire data_mem_ctrl_web;
+	wire [(DATAPATH / 32) - 1:0] data_mem_ctrl_wmask;
+	wire [DATA_MEM_ADDR_WIDTH - 1:0] data_mem_ctrl_addr;
+	wire [DATAPATH - 1:0] data_mem_ctrl_wdata;
 	wire mat_inv_vld_out;
 	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_out_l;
 	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_out_u;
+	wire [31:0] instr_aggregator_dout;
 	wire [DATAPATH - 1:0] input_aggregator_dout;
-	wire [DATA_WIDTH - 1:0] instr_aggregator_dout;
 	mvp_core #(
 		.SIG_WIDTH(SIG_WIDTH),
 		.EXP_WIDTH(EXP_WIDTH),
 		.IEEE_COMPLIANCE(IEEE_COMPLIANCE),
 		.VECTOR_LANES(VECTOR_LANES),
-		.ADDR_WIDTH(ADDR_WIDTH),
-		.INSTR_MEM_ADDR_WIDTH(INSTR_MEM_ADDR_WIDTH),
-		.DATA_MEM_ADDR_WIDTH(DATA_MEM_ADDR_WIDTH)
+		.INSTR_MEM_ADDR_WIDTH(INSTR_MEM_ADDR_WIDTH)
 	) mvp_core_inst(
 		.clk(clk),
 		.rst_n(rst_n),
@@ -652,10 +680,10 @@ module accelerator (
 		.mem_we(mvp_mem_we),
 		.mem_ren(mvp_mem_ren),
 		.mem_wdata(mvp_mem_wdata),
-		.mem_rdata(mvp_mem_rdata),
+		.mem_rdata(mem_ctrl_rdata),
 		.width(width)
 	);
-	mat_inv mat_inv_inst(
+	mat_inv #(.DATA_WIDTH(DATA_WIDTH)) mat_inv_inst(
 		.clk(clk),
 		.rst_n(rst_n),
 		.en(mat_inv_en),
@@ -671,11 +699,11 @@ module accelerator (
 		.DEPTH(INSTR_MEM_BANK_DEPTH)
 	) instr_mem(
 		.clk(clk),
-		.csb0(instr_wen || instr_mem_csb),
-		.web0(instr_wen || instr_mem_web),
-		.addr0((instr_wen ? instr_wadr : instr_mem_addr)),
+		.csb0(instr_mem_csb),
+		.web0(instr_mem_web),
+		.addr0(instr_mem_addr),
 		.wmask0(1'b1),
-		.din0(instr_aggregator_dout),
+		.din0(instr_mem_wdata),
 		.dout0(instr_mem_rdata),
 		.csb1(~instr_full_n),
 		.addr1(pc),
@@ -687,16 +715,58 @@ module accelerator (
 		.DEPTH(DATA_MEM_BANK_DEPTH)
 	) data_mem(
 		.clk(clk),
-		.csb0(input_wen || data_mem_csb),
-		.web0(input_wen || data_mem_web),
-		.addr0((input_wen ? input_wadr : data_mem_addr)),
-		.wmask0((input_wen ? 8'hff : data_mem_wmask0)),
-		.din0((input_wen ? input_aggregator_dout : data_mem_wdata)),
+		.csb0(data_mem_csb),
+		.web0(data_mem_web),
+		.addr0(data_mem_addr),
+		.wmask0(data_mem_wmask),
+		.din0(data_mem_wdata),
 		.dout0(data_mem_rdata),
 		.csb1(output_wb_ren),
 		.addr1(output_wb_radr),
 		.dout1(output_wb_data)
 	);
+	always @(*) begin
+		if (instr_wen) begin
+			instr_mem_csb = instr_wen;
+			instr_mem_web = 1'b1;
+			instr_mem_addr = instr_wadr;
+			instr_mem_wdata = instr_aggregator_dout;
+		end
+		else begin
+			instr_mem_csb = instr_mem_ctrl_csb;
+			instr_mem_web = instr_mem_ctrl_web;
+			instr_mem_addr = instr_mem_ctrl_addr;
+			instr_mem_wdata = instr_mem_ctrl_wdata;
+		end
+		if (input_wen) begin
+			data_mem_csb = input_wen;
+			data_mem_web = 1'b1;
+			data_mem_addr = input_wadr;
+			data_mem_wmask = 8'hff;
+			data_mem_wdata = input_aggregator_dout;
+		end
+		else begin
+			data_mem_csb = data_mem_ctrl_csb;
+			data_mem_web = data_mem_ctrl_web;
+			data_mem_addr = data_mem_ctrl_addr;
+			data_mem_wmask = data_mem_ctrl_wmask;
+			data_mem_wdata = data_mem_ctrl_wdata;
+		end
+		if (wbs_debug && ~mvp_core_en) begin
+			mem_ctrl_we = wbs_mem_we;
+			mem_ctrl_ren = wbs_mem_ren;
+			mem_ctrl_addr = wbs_mem_addr;
+			mem_ctrl_wdata = wbs_mem_wdata;
+			mem_ctrl_width = 3'b010;
+		end
+		else begin
+			mem_ctrl_we = mvp_mem_we;
+			mem_ctrl_ren = mvp_mem_ren;
+			mem_ctrl_addr = mvp_mem_addr;
+			mem_ctrl_wdata = mvp_mem_wdata;
+			mem_ctrl_width = width;
+		end
+	end
 	memory_controller #(
 		.ADDR_WIDTH(ADDR_WIDTH),
 		.DATA_WIDTH(DATA_WIDTH),
@@ -706,26 +776,27 @@ module accelerator (
 		.DATA_MEM_ADDR_WIDTH(DATA_MEM_ADDR_WIDTH)
 	) mem_ctrl_inst(
 		.clk(clk),
-		.mem_addr(mvp_mem_addr),
-		.mem_we(mvp_mem_we),
-		.mem_ren(mvp_mem_ren),
-		.mem_wdata(mvp_mem_wdata),
-		.mem_rdata(mvp_mem_rdata),
-		.width(width),
-		.instr_mem_addr(instr_mem_addr),
-		.instr_mem_csb(instr_mem_csb),
-		.instr_mem_web(instr_mem_web),
-		.instr_mem_wdata(instr_mem_wdata),
+		.mem_we(mem_ctrl_we),
+		.mem_ren(mem_ctrl_ren),
+		.mem_addr(mem_ctrl_addr),
+		.mem_wdata(mem_ctrl_wdata),
+		.mem_rdata(mem_ctrl_rdata),
+		.width(mem_ctrl_width),
+		.instr_mem_csb(instr_mem_ctrl_csb),
+		.instr_mem_web(instr_mem_ctrl_web),
+		.instr_mem_addr(instr_mem_ctrl_addr),
+		.instr_mem_wdata(instr_mem_ctrl_wdata),
 		.instr_mem_rdata(instr_mem_rdata),
-		.data_mem_addr(data_mem_addr),
-		.data_mem_csb(data_mem_csb),
-		.data_mem_web(data_mem_web),
-		.data_mem_wmask(data_mem_wmask0),
-		.data_mem_wdata(data_mem_wdata),
+		.data_mem_csb(data_mem_ctrl_csb),
+		.data_mem_web(data_mem_ctrl_web),
+		.data_mem_addr(data_mem_ctrl_addr),
+		.data_mem_wmask(data_mem_ctrl_wmask),
+		.data_mem_wdata(data_mem_ctrl_wdata),
 		.data_mem_rdata(data_mem_rdata),
-		.mat_inv_in_l(mat_inv_out_l),
-		.mat_inv_in_u(mat_inv_out_u)
+		.mat_inv_out_l(mat_inv_out_l),
+		.mat_inv_out_u(mat_inv_out_u)
 	);
+	assign wbs_mem_rdata = mem_ctrl_rdata;
 	fifo #(
 		.DATA_WIDTH(INPUT_FIFO_WIDTH),
 		.FIFO_DEPTH(3),
@@ -806,6 +877,9 @@ module accelerator (
 	) controller_inst(
 		.clk(clk),
 		.rst_n(rst_n),
+		.wbs_debug(wbs_debug),
+		.wbs_fsm_start(wbs_fsm_start),
+		.wbs_fsm_done(wbs_fsm_done),
 		.params_fifo_dout(input_fifo_dout),
 		.params_fifo_deq(params_fifo_deq),
 		.params_fifo_empty_n(input_fifo_empty_n),
@@ -826,6 +900,34 @@ module accelerator (
 		.mat_inv_vld_out(mat_inv_vld_out),
 		.mvp_core_en(mvp_core_en)
 	);
+endmodule
+module alu (
+	inst_a,
+	inst_b,
+	opcode,
+	z_inst
+);
+	input wire [31:0] inst_a;
+	input wire [31:0] inst_b;
+	input wire [3:0] opcode;
+	output reg [31:0] z_inst;
+	wire signed [31:0] inst_a_signed = inst_a;
+	wire signed [31:0] inst_b_signed = inst_b;
+	always @(*)
+		case (opcode)
+			4'b0000: z_inst = inst_a + inst_b;
+			4'b0001: z_inst = inst_a - inst_b;
+			4'b0010: z_inst = inst_a_signed < inst_b_signed;
+			4'b0011: z_inst = inst_a < inst_b;
+			4'b0100: z_inst = inst_a & inst_b;
+			4'b0101: z_inst = inst_a | inst_b;
+			4'b0110: z_inst = inst_a ^ inst_b;
+			4'b0111: z_inst = inst_b << inst_a[4:0];
+			4'b1000: z_inst = inst_b >> inst_a[4:0];
+			4'b1001: z_inst = inst_b_signed >>> inst_a[4:0];
+			4'b1010: z_inst = inst_a * inst_b;
+			default: z_inst = 32'b00000000000000000000000000000000;
+		endcase
 endmodule
 module circle_PE_LU (
 	clk,
@@ -882,9 +984,47 @@ module circle_PE_Tri (
 		.status()
 	);
 endmodule
+module clock_mux (
+	clk,
+	clk_select,
+	clk_out
+);
+	parameter num_clocks = 4;
+	input [num_clocks - 1:0] clk;
+	input [num_clocks - 1:0] clk_select;
+	output wire clk_out;
+	genvar i;
+	reg [num_clocks - 1:0] ena_r0;
+	reg [num_clocks - 1:0] ena_r1;
+	reg [num_clocks - 1:0] ena_r2;
+	wire [num_clocks - 1:0] qualified_sel;
+	wire [num_clocks - 1:0] gated_clks;
+	initial begin
+		ena_r0 = 0;
+		ena_r1 = 0;
+		ena_r2 = 0;
+	end
+	generate
+		for (i = 0; i < num_clocks; i = i + 1) begin : lp0
+			wire [num_clocks - 1:0] tmp_mask;
+			assign tmp_mask = {num_clocks {1'b1}} ^ (1 << i);
+			assign qualified_sel[i] = clk_select[i] & ~|(ena_r2 & tmp_mask);
+			always @(posedge clk[i]) begin
+				ena_r0[i] <= qualified_sel[i];
+				ena_r1[i] <= ena_r0[i];
+			end
+			always @(negedge clk[i]) ena_r2[i] <= ena_r1[i];
+			assign gated_clks[i] = clk[i] & ena_r2[i];
+		end
+	endgenerate
+	assign clk_out = |gated_clks;
+endmodule
 module controller (
 	clk,
 	rst_n,
+	wbs_debug,
+	wbs_fsm_start,
+	wbs_fsm_done,
 	params_fifo_dout,
 	params_fifo_deq,
 	params_fifo_empty_n,
@@ -914,6 +1054,9 @@ module controller (
 	parameter CONFIG_ADDR_WIDTH = $clog2(NUM_CONFIGS);
 	input wire clk;
 	input wire rst_n;
+	input wire wbs_debug;
+	input wire wbs_fsm_start;
+	output wire wbs_fsm_done;
 	input wire [INPUT_FIFO_WIDTH - 1:0] params_fifo_dout;
 	output wire params_fifo_deq;
 	input wire params_fifo_empty_n;
@@ -947,8 +1090,6 @@ module controller (
 	reg [ADDR_WIDTH - 1:0] input_wadr_r;
 	reg [ADDR_WIDTH - 1:0] output_wbadr_r;
 	reg mat_inv_en_r;
-	wire config_adr;
-	assign config_adr = config_adr_r;
 	assign instr_wadr = instr_wadr_r;
 	assign input_wadr = input_wadr_r[3+:DATA_MEM_ADDR_WIDTH];
 	assign output_wb_radr = output_wbadr_r[3+:DATA_MEM_ADDR_WIDTH];
@@ -957,6 +1098,7 @@ module controller (
 	assign input_full_n = (state_r == 3) && (input_wadr_r <= (input_wadr_offset + input_max_wadr_c));
 	assign output_empty_n = (state_r == 3) && (output_wbadr_r <= (output_radr_offset + output_max_adr_c));
 	assign mat_inv_vld = mat_inv_en && ~mat_inv_en_r;
+	assign wbs_fsm_done = state_r == 3;
 	always @(posedge clk)
 		if (~rst_n) begin
 			state_r <= 0;
@@ -977,6 +1119,10 @@ module controller (
 					if (config_adr_r == (NUM_CONFIGS - 1))
 						state_r <= 1;
 				end
+				if (wbs_debug && wbs_fsm_start) begin
+					state_r <= 2;
+					mvp_core_en <= 1;
+				end
 			end
 			else if (state_r == 1) begin
 				instr_wadr_r <= (instr_wen && (instr_wadr_r <= instr_max_wadr_c) ? instr_wadr_r + 1 : instr_wadr_r);
@@ -996,7 +1142,7 @@ module controller (
 					mvp_core_en <= 0;
 					mat_inv_en <= 1;
 				end
-				else if (mat_inv_en && mat_inv_vld_out) begin
+				else if (mat_inv_en_r && mat_inv_vld_out) begin
 					mvp_core_en <= 1;
 					mat_inv_en <= 0;
 				end
@@ -1008,6 +1154,10 @@ module controller (
 					mvp_core_en <= 1;
 					state_r <= 2;
 				end
+				if (wbs_debug && wbs_fsm_start) begin
+					state_r <= 2;
+					mvp_core_en <= 1;
+				end
 			end
 		end
 	assign instr_max_wadr_c = config_r[0];
@@ -1018,15 +1168,17 @@ module controller (
 endmodule
 module decoder (
 	instr,
-	vfu_opcode,
 	vd_addr,
 	vs1_addr,
 	vs2_addr,
 	vs3_addr,
-	op_sel,
+	func_sel,
 	funct3,
+	wb_sel,
 	masking,
 	reg_we,
+	jump,
+	branch,
 	mem_we,
 	mem_addr,
 	vd_addr_ex1,
@@ -1035,21 +1187,23 @@ module decoder (
 	reg_we_ex1,
 	reg_we_ex2,
 	reg_we_ex3,
-	op_sel_ex1,
-	op_sel_ex2,
-	op_sel_ex3,
+	wb_sel_ex1,
+	wb_sel_ex2,
+	wb_sel_ex3,
 	stall
 );
 	input wire [31:0] instr;
-	output reg [4:0] vfu_opcode;
 	output wire [4:0] vd_addr;
 	output wire [4:0] vs1_addr;
 	output wire [4:0] vs2_addr;
 	output wire [4:0] vs3_addr;
-	output reg [3:0] op_sel;
+	output reg [4:0] func_sel;
 	output wire [2:0] funct3;
+	output reg [4:0] wb_sel;
 	output wire masking;
 	output wire reg_we;
+	output wire jump;
+	output wire branch;
 	output wire mem_we;
 	output wire [11:0] mem_addr;
 	input wire [4:0] vd_addr_ex1;
@@ -1058,15 +1212,16 @@ module decoder (
 	input wire reg_we_ex1;
 	input wire reg_we_ex2;
 	input wire reg_we_ex3;
-	input wire [3:0] op_sel_ex1;
-	input wire [3:0] op_sel_ex2;
-	input wire [3:0] op_sel_ex3;
+	input wire [4:0] wb_sel_ex1;
+	input wire [4:0] wb_sel_ex2;
+	input wire [4:0] wb_sel_ex3;
 	output wire stall;
 	wire [6:0] opcode;
 	wire [4:0] dest;
 	wire [4:0] src1;
 	wire [4:0] src2;
 	wire [5:0] funct6;
+	wire [11:0] branch_offset;
 	assign opcode = instr[6:0];
 	assign dest = instr[11:7];
 	assign funct3 = instr[14:12];
@@ -1074,56 +1229,80 @@ module decoder (
 	assign src2 = instr[24:20];
 	assign masking = instr[25];
 	assign funct6 = instr[31:26];
+	assign branch_offset = {instr[31:25], instr[11:7]};
 	wire overwrite_multiplicand;
-	assign overwrite_multiplicand = (((opcode == 6'b101100) || (opcode == 6'b101101)) || (opcode == 6'b101110)) || (opcode == 6'b101111);
+	assign overwrite_multiplicand = (((opcode == 6'b101100) || (opcode == 6'b101110)) || (opcode == 6'b101101)) || (opcode == 6'b101111);
 	assign vs1_addr = src1;
 	assign vs2_addr = (overwrite_multiplicand ? dest : src2);
 	assign vs3_addr = (opcode == 7'b0001011 ? instr[31:27] : (overwrite_multiplicand ? src2 : dest));
 	assign vd_addr = dest;
 	always @(*) begin
 		case ({opcode, funct6})
-			13'b1010111000000: vfu_opcode = 5'b00000;
-			13'b1010111000010: vfu_opcode = 5'b00001;
-			13'b1010111000100: vfu_opcode = 5'b01000;
-			13'b1010111000110: vfu_opcode = 5'b01001;
-			13'b1010111001000: vfu_opcode = 5'b01010;
-			13'b1010111001001: vfu_opcode = 5'b01011;
-			13'b1010111001010: vfu_opcode = 5'b01100;
-			13'b1010111011000: vfu_opcode = 5'b01101;
-			13'b1010111011001: vfu_opcode = 5'b01111;
-			13'b1010111011011: vfu_opcode = 5'b01110;
-			13'b1010111100100: vfu_opcode = 5'b00010;
-			13'b1010111101000: vfu_opcode = 5'b00100;
-			13'b1010111101001: vfu_opcode = 5'b00110;
-			13'b1010111101010: vfu_opcode = 5'b00101;
-			13'b1010111101011: vfu_opcode = 5'b00111;
-			13'b1010111101100: vfu_opcode = 5'b00100;
-			13'b1010111101101: vfu_opcode = 5'b00110;
-			13'b1010111101110: vfu_opcode = 5'b00101;
-			13'b1010111101111: vfu_opcode = 5'b00111;
-			13'b1010111010010: vfu_opcode = 5'b10000;
-			default: vfu_opcode = 5'b00000;
+			13'b1010111000000: func_sel = 5'b00000;
+			13'b1010111000010: func_sel = 5'b00001;
+			13'b1010111000100: func_sel = 5'b01000;
+			13'b1010111000110: func_sel = 5'b01001;
+			13'b1010111001000: func_sel = 5'b01010;
+			13'b1010111001001: func_sel = 5'b01011;
+			13'b1010111001010: func_sel = 5'b01100;
+			13'b1010111001010: func_sel = 5'b01100;
+			13'b1010111001110: func_sel = 5'b10011;
+			13'b1010111001111: func_sel = 5'b10100;
+			13'b1010111011000: func_sel = 5'b01111;
+			13'b1010111011001: func_sel = 5'b10001;
+			13'b1010111011011: func_sel = 5'b10000;
+			13'b1010111100100: func_sel = 5'b00010;
+			13'b1010111101000: func_sel = 5'b00100;
+			13'b1010111101001: func_sel = 5'b00110;
+			13'b1010111101010: func_sel = 5'b00101;
+			13'b1010111101011: func_sel = 5'b00111;
+			13'b1010111101100: func_sel = 5'b00100;
+			13'b1010111101101: func_sel = 5'b00110;
+			13'b1010111101110: func_sel = 5'b00101;
+			13'b1010111101111: func_sel = 5'b00111;
+			13'b1010111110000: func_sel = 5'b10101;
+			13'b1010111110001: func_sel = 5'b10110;
+			13'b1010111110010: func_sel = 5'b10111;
+			default: func_sel = 1'sb0;
 		endcase
+		if (opcode == 7'b1100011)
+			case (funct3)
+				3'b000: func_sel = 5'b01111;
+				3'b100: func_sel = 5'b10000;
+				default: func_sel = 1'sb0;
+			endcase
+		if ((opcode == 7'b1010111) && (funct6 == 6'b010010))
+			case (src1)
+				5'b00001: func_sel = 5'b01101;
+				5'b00011: func_sel = 5'b01110;
+				default: func_sel = 1'sb0;
+			endcase
+		if ((opcode == 7'b1010111) && (funct6 == 6'b010011))
+			case (src1)
+				5'b10000: func_sel = 5'b10010;
+				default: func_sel = 1'sb0;
+			endcase
 		case (opcode)
-			7'b1010011: op_sel = 4'b0001;
-			7'b1010111: op_sel = 4'b0010;
-			7'b0001011: op_sel = 4'b0100;
-			7'b0000111: op_sel = 4'b1000;
-			default: op_sel = 4'b0000;
+			7'b0000111: wb_sel = 5'b00010;
+			7'b1010111: wb_sel = (~|func_sel[4:3] ? 5'b00100 : 5'b00001);
+			7'b1010011: wb_sel = 5'b01000;
+			7'b0001011: wb_sel = 5'b10000;
+			7'b1100011: wb_sel = 5'b00001;
+			default: wb_sel = 5'b00000;
 		endcase
-		if (|vfu_opcode[4:3])
-			op_sel = 4'b0000;
 	end
-	assign mem_addr = instr[31:20];
+	assign mem_addr = (branch ? branch_offset : instr[31:20]);
 	assign mem_we = opcode == 7'b0100111;
-	assign reg_we = ~mem_we;
+	assign jump = opcode == 7'b1100111;
+	assign branch = opcode == 7'b1100011;
+	assign reg_we = (~mem_we && ~jump) && ~branch;
 	wire stage1_dependency;
 	wire stage2_dependency;
 	wire stage3_dependency;
 	assign stage1_dependency = (((vs1_addr == vd_addr_ex1) || (vs2_addr == vd_addr_ex1)) || (vs3_addr == vd_addr_ex1)) && reg_we_ex1;
 	assign stage2_dependency = (((vs1_addr == vd_addr_ex2) || (vs2_addr == vd_addr_ex2)) || (vs3_addr == vd_addr_ex2)) && reg_we_ex2;
 	assign stage3_dependency = (((vs1_addr == vd_addr_ex3) || (vs2_addr == vd_addr_ex3)) || (vs3_addr == vd_addr_ex3)) && reg_we_ex3;
-	assign stall = ((stage1_dependency && |op_sel_ex1) || (stage2_dependency && |op_sel_ex2[2:0])) || (stage3_dependency && op_sel_ex3[2]);
+	assign stall = ((stage1_dependency && |wb_sel_ex1[4:1]) || (stage2_dependency && |wb_sel_ex2[4:2])) || (stage3_dependency && wb_sel_ex3[4]);
 endmodule
 module dot_product_unit (
 	clk,
@@ -1155,6 +1334,12 @@ module dot_product_unit (
 	wire [((VECTOR_LANES * 8) * DATA_WIDTH) - 1:0] dp4_rot_in;
 	reg [((VECTOR_LANES * 8) * DATA_WIDTH) - 1:0] inst_dp4;
 	wire [(VECTOR_LANES * 8) - 1:0] status_inst;
+	wire [EXP_WIDTH + SIG_WIDTH:0] one;
+	wire [EXP_WIDTH - 1:0] one_exp;
+	wire [SIG_WIDTH - 1:0] one_sig;
+	assign one_exp = (1 << (EXP_WIDTH - 1)) - 1;
+	assign one_sig = 0;
+	assign one = {1'b0, one_exp, one_sig};
 	genvar i;
 	generate
 		for (i = 0; i < 3; i = i + 1) begin : mat_col
@@ -1167,7 +1352,7 @@ module dot_product_unit (
 				assign dp4_mat_in[((((3 * i) + j) * 8) + 4) * DATA_WIDTH+:DATA_WIDTH] = vec_a[(6 + j) * DATA_WIDTH+:DATA_WIDTH];
 				assign dp4_mat_in[((((3 * i) + j) * 8) + 5) * DATA_WIDTH+:DATA_WIDTH] = vec_b[((3 * i) + 2) * DATA_WIDTH+:DATA_WIDTH];
 				assign dp4_mat_in[((((3 * i) + j) * 8) + 6) * DATA_WIDTH+:DATA_WIDTH] = vec_c[((3 * i) + j) * DATA_WIDTH+:DATA_WIDTH];
-				assign dp4_mat_in[((((3 * i) + j) * 8) + 7) * DATA_WIDTH+:DATA_WIDTH] = 32'h3f800000;
+				assign dp4_mat_in[((((3 * i) + j) * 8) + 7) * DATA_WIDTH+:DATA_WIDTH] = one;
 			end
 		end
 		for (i = 0; i < (VECTOR_LANES / 4); i = i + 1) begin : dot_product
@@ -1189,7 +1374,7 @@ module dot_product_unit (
 	endgenerate
 	assign dp4_qmul_in[0+:DATA_WIDTH * 8] = {vec_a[0+:DATA_WIDTH], vec_b[0+:DATA_WIDTH], a_neg[1], vec_b[DATA_WIDTH+:DATA_WIDTH], a_neg[2], vec_b[2 * DATA_WIDTH+:DATA_WIDTH], a_neg[3], vec_b[3 * DATA_WIDTH+:DATA_WIDTH]};
 	assign dp4_qmul_in[DATA_WIDTH * 8+:DATA_WIDTH * 8] = {vec_a[0+:DATA_WIDTH], vec_b[DATA_WIDTH+:DATA_WIDTH], vec_a[DATA_WIDTH+:DATA_WIDTH], vec_b[0+:DATA_WIDTH], vec_a[2 * DATA_WIDTH+:DATA_WIDTH], vec_b[3 * DATA_WIDTH+:DATA_WIDTH], a_neg[3], vec_b[2 * DATA_WIDTH+:DATA_WIDTH]};
-	assign dp4_qmul_in[DATA_WIDTH * 16+:DATA_WIDTH * 8] = {vec_a[0+:DATA_WIDTH], vec_b[2 * DATA_WIDTH+:DATA_WIDTH], a_neg[1], vec_b[3 * DATA_WIDTH+:DATA_WIDTH], vec_a[2 * DATA_WIDTH+:DATA_WIDTH], vec_b[0+:DATA_WIDTH], vec_a[3 * DATA_WIDTH+:DATA_WIDTH], vec_b[3 * DATA_WIDTH+:DATA_WIDTH]};
+	assign dp4_qmul_in[DATA_WIDTH * 16+:DATA_WIDTH * 8] = {vec_a[0+:DATA_WIDTH], vec_b[2 * DATA_WIDTH+:DATA_WIDTH], a_neg[1], vec_b[3 * DATA_WIDTH+:DATA_WIDTH], vec_a[2 * DATA_WIDTH+:DATA_WIDTH], vec_b[0+:DATA_WIDTH], vec_a[3 * DATA_WIDTH+:DATA_WIDTH], vec_b[DATA_WIDTH+:DATA_WIDTH]};
 	assign dp4_qmul_in[DATA_WIDTH * 24+:DATA_WIDTH * 8] = {vec_a[0+:DATA_WIDTH], vec_b[3 * DATA_WIDTH+:DATA_WIDTH], vec_a[DATA_WIDTH+:DATA_WIDTH], vec_b[2 * DATA_WIDTH+:DATA_WIDTH], a_neg[2], vec_b[DATA_WIDTH+:DATA_WIDTH], vec_a[3 * DATA_WIDTH+:DATA_WIDTH], vec_b[0+:DATA_WIDTH]};
 	assign dp4_rot_in[0+:DATA_WIDTH * 8] = {vec_a[DATA_WIDTH+:DATA_WIDTH], vec_a[DATA_WIDTH+:DATA_WIDTH], vec_a[2 * DATA_WIDTH+:DATA_WIDTH], a_neg[2], a_neg[3], vec_a[3 * DATA_WIDTH+:DATA_WIDTH], vec_a[0+:DATA_WIDTH], vec_a[0+:DATA_WIDTH]};
 	assign dp4_rot_in[DATA_WIDTH * 8+:DATA_WIDTH * 8] = {vec_a[2 * DATA_WIDTH+:DATA_WIDTH], vec_a[DATA_WIDTH+:DATA_WIDTH], vec_a[DATA_WIDTH+:DATA_WIDTH], vec_a[2 * DATA_WIDTH+:DATA_WIDTH], vec_a[0+:DATA_WIDTH], vec_a[3 * DATA_WIDTH+:DATA_WIDTH], vec_a[3 * DATA_WIDTH+:DATA_WIDTH], vec_a[0+:DATA_WIDTH]};
@@ -1244,29 +1429,149 @@ module dot_product_unit (
 		end
 	endgenerate
 endmodule
+module fpu (
+	inst_a,
+	inst_b,
+	inst_rnd,
+	inst_DG_ctrl,
+	opcode,
+	z_inst
+);
+	parameter SIG_WIDTH = 23;
+	parameter EXP_WIDTH = 8;
+	parameter IEEE_COMPLIANCE = 0;
+	input wire [31:0] inst_a;
+	input wire [31:0] inst_b;
+	input wire [2:0] inst_rnd;
+	input wire inst_DG_ctrl;
+	input wire [4:0] opcode;
+	output reg [31:0] z_inst;
+	localparam DATA_WIDTH = (SIG_WIDTH + EXP_WIDTH) + 1;
+	wire aeqb_inst;
+	wire altb_inst;
+	wire agtb_inst;
+	wire unordered_inst;
+	wire [DATA_WIDTH - 1:0] z0_inst;
+	wire [DATA_WIDTH - 1:0] z1_inst;
+	wire [7:0] status0_inst;
+	wire [7:0] status1_inst;
+	wire [DATA_WIDTH - 1:0] flt2i_inst;
+	wire [7:0] flt2i_status;
+	wire [DATA_WIDTH - 1:0] i2flt_inst;
+	wire [7:0] i2flt_status;
+	wire [DATA_WIDTH - 1:0] sgnj;
+	wire [DATA_WIDTH - 1:0] sgnjn;
+	wire [DATA_WIDTH - 1:0] sgnjx;
+	wire [DATA_WIDTH - 1:0] fclass_mask;
+	DW_fp_cmp_DG #(
+		.sig_width(SIG_WIDTH),
+		.exp_width(EXP_WIDTH),
+		.ieee_compliance(IEEE_COMPLIANCE)
+	) DW_fp_cmp_DG_inst(
+		.a(inst_a),
+		.b(inst_b),
+		.zctr(1'b0),
+		.DG_ctrl(inst_DG_ctrl),
+		.aeqb(aeqb_inst),
+		.altb(altb_inst),
+		.agtb(agtb_inst),
+		.unordered(unordered_inst),
+		.z0(z0_inst),
+		.z1(z1_inst),
+		.status0(status0_inst),
+		.status1(status1_inst)
+	);
+	DW_fp_flt2i #(
+		.sig_width(SIG_WIDTH),
+		.exp_width(EXP_WIDTH),
+		.isize(DATA_WIDTH),
+		.ieee_compliance(IEEE_COMPLIANCE)
+	) DW_fp_flt2i_inst(
+		.a(inst_b),
+		.rnd(inst_rnd),
+		.z(flt2i_inst),
+		.status(flt2i_status)
+	);
+	DW_fp_i2flt #(
+		.sig_width(SIG_WIDTH),
+		.exp_width(EXP_WIDTH),
+		.isize(DATA_WIDTH),
+		.isign(1)
+	) DW_fp_i2flt_inst(
+		.a(inst_b),
+		.rnd(inst_rnd),
+		.z(i2flt_inst),
+		.status(i2flt_status)
+	);
+	assign sgnj = {inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
+	assign sgnjn = {~inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
+	assign sgnjx = {inst_a[DATA_WIDTH - 1] ^ inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
+	wire zero_sig;
+	assign zero_sig = inst_b[SIG_WIDTH - 1:0] == 0;
+	wire zero_exp;
+	assign zero_exp = inst_b[SIG_WIDTH+:EXP_WIDTH] == 0;
+	wire nan_exp;
+	assign nan_exp = &inst_b[SIG_WIDTH+:EXP_WIDTH];
+	assign fclass_mask[0] = (inst_b[31] && nan_exp) && zero_sig;
+	assign fclass_mask[1] = (inst_b[31] && ~nan_exp) && ~zero_exp;
+	assign fclass_mask[2] = (inst_b[31] && zero_exp) && ~zero_sig;
+	assign fclass_mask[3] = (inst_b[31] && zero_exp) && zero_sig;
+	assign fclass_mask[4] = (~inst_b[31] && zero_exp) && zero_sig;
+	assign fclass_mask[5] = (~inst_b[31] && zero_exp) && ~zero_sig;
+	assign fclass_mask[6] = (~inst_b[31] && ~nan_exp) && ~zero_exp;
+	assign fclass_mask[7] = (~inst_b[31] && nan_exp) && zero_sig;
+	assign fclass_mask[8] = (nan_exp && ~inst_b[SIG_WIDTH - 1]) && ~zero_sig;
+	assign fclass_mask[9] = nan_exp && inst_b[SIG_WIDTH - 1];
+	assign fclass_mask[DATA_WIDTH - 1:10] = 1'sb0;
+	always @(*)
+		case (opcode)
+			5'b01000: z_inst = z0_inst;
+			5'b01001: z_inst = z1_inst;
+			5'b01010: z_inst = sgnj;
+			5'b01011: z_inst = sgnjn;
+			5'b01100: z_inst = sgnjx;
+			5'b01101: z_inst = flt2i_inst;
+			5'b01110: z_inst = i2flt_inst;
+			5'b01111: z_inst = aeqb_inst;
+			5'b10000: z_inst = altb_inst;
+			5'b10001: z_inst = aeqb_inst || altb_inst;
+			5'b10010: z_inst = fclass_mask;
+			default: z_inst = 1'sb0;
+		endcase
+endmodule
 module instruction_fetch (
 	clk,
 	rst_n,
 	en,
+	jump,
+	jump_addr,
+	branch,
+	branch_offset,
 	pc
 );
 	parameter ADDR_WIDTH = 8;
 	input wire clk;
 	input wire rst_n;
 	input wire en;
+	input wire jump;
+	input wire [ADDR_WIDTH - 1:0] jump_addr;
+	input branch;
+	input wire [ADDR_WIDTH - 1:0] branch_offset;
 	output wire [ADDR_WIDTH - 1:0] pc;
 	reg [ADDR_WIDTH - 1:0] pc_pipe1;
 	reg [ADDR_WIDTH - 1:0] pc_pipe2;
+	wire [ADDR_WIDTH - 1:0] pc_next;
+	assign pc = (en ? pc_pipe1 : pc_pipe2);
+	assign pc_next = (jump ? jump_addr : (branch ? branch_offset : pc + 1));
 	always @(posedge clk)
 		if (~rst_n) begin
 			pc_pipe1 <= 0;
 			pc_pipe2 <= 0;
 		end
 		else if (en) begin
-			pc_pipe1 <= pc_pipe1 + 1;
+			pc_pipe1 <= pc_next;
 			pc_pipe2 <= pc_pipe1;
 		end
-	assign pc = (en ? pc_pipe1 : pc_pipe2);
 endmodule
 module mat_inv (
 	clk,
@@ -1460,9 +1765,9 @@ module mat_inv (
 endmodule
 module memory_controller (
 	clk,
-	mem_addr,
 	mem_we,
 	mem_ren,
+	mem_addr,
 	mem_wdata,
 	mem_rdata,
 	width,
@@ -1477,8 +1782,8 @@ module memory_controller (
 	data_mem_wmask,
 	data_mem_wdata,
 	data_mem_rdata,
-	mat_inv_in_l,
-	mat_inv_in_u
+	mat_inv_out_l,
+	mat_inv_out_u
 );
 	parameter ADDR_WIDTH = 12;
 	parameter DATA_WIDTH = 32;
@@ -1487,9 +1792,9 @@ module memory_controller (
 	parameter INSTR_MEM_ADDR_WIDTH = 8;
 	parameter DATA_MEM_ADDR_WIDTH = 12;
 	input wire clk;
-	input wire [ADDR_WIDTH - 1:0] mem_addr;
 	input wire mem_we;
 	input wire mem_ren;
+	input wire [ADDR_WIDTH - 1:0] mem_addr;
 	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_wdata;
 	output reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata;
 	input wire [2:0] width;
@@ -1502,12 +1807,14 @@ module memory_controller (
 	output reg data_mem_csb;
 	output reg data_mem_web;
 	output reg [(DATAPATH / 32) - 1:0] data_mem_wmask;
-	output wire [DATAPATH - 1:0] data_mem_wdata;
+	output reg [DATAPATH - 1:0] data_mem_wdata;
 	input wire [DATAPATH - 1:0] data_mem_rdata;
-	input wire [(9 * DATA_WIDTH) - 1:0] mat_inv_in_l;
-	input wire [(9 * DATA_WIDTH) - 1:0] mat_inv_in_u;
-	localparam ADDR_MASK = 12'h800;
+	input wire [(9 * DATA_WIDTH) - 1:0] mat_inv_out_l;
+	input wire [(9 * DATA_WIDTH) - 1:0] mat_inv_out_u;
+	localparam MASK_BITS = DATAPATH / 32;
+	localparam DATA_MASK = 12'h800;
 	localparam DATA_ADDR = 12'h000;
+	localparam TEXT_MASK = 12'he00;
 	localparam TEXT_ADDR = 12'h800;
 	localparam IO_ADDR = 12'ha00;
 	localparam INVMAT_ADDR = 12'ha02;
@@ -1518,29 +1825,45 @@ module memory_controller (
 	assign instr_mem_addr = mem_addr[INSTR_MEM_ADDR_WIDTH - 1:0];
 	assign instr_mem_wdata = mem_wdata;
 	assign data_mem_addr = mem_addr[3+:DATA_MEM_ADDR_WIDTH];
-	assign data_mem_wdata = mem_wdata;
 	always @(*) begin
 		instr_mem_csb = 1'b0;
 		instr_mem_web = 1'b0;
+		data_mem_csb = 1'b0;
 		data_mem_web = 1'b0;
-		data_mem_web = 1'b0;
-		data_mem_wmask = 1'sb1;
-		if ((mem_addr & ADDR_MASK) == DATA_ADDR) begin
+		case (width)
+			3'b010: data_mem_wmask = 1'b1;
+			3'b011: data_mem_wmask = {2 {1'b1}};
+			3'b100: data_mem_wmask = {4 {1'b1}};
+			default: data_mem_wmask = {8 {1'b1}};
+		endcase
+		data_mem_wmask = data_mem_wmask << mem_addr[2:0];
+		case (mem_addr[2:0])
+			3'b000: data_mem_wdata = mem_wdata;
+			3'b001: data_mem_wdata = mem_wdata << 32;
+			3'b010: data_mem_wdata = mem_wdata << 64;
+			3'b011: data_mem_wdata = mem_wdata << 96;
+			3'b100: data_mem_wdata = mem_wdata << 128;
+			3'b101: data_mem_wdata = mem_wdata << 160;
+			3'b110: data_mem_wdata = mem_wdata << 192;
+			3'b111: data_mem_wdata = mem_wdata << 224;
+			default: data_mem_wdata = 1'sb0;
+		endcase
+		if ((mem_addr & DATA_MASK) == DATA_ADDR) begin
 			data_mem_csb = mem_ren || mem_we;
 			data_mem_web = mem_we;
 		end
-		else if ((mem_addr & ADDR_MASK) == TEXT_ADDR) begin
+		else if ((mem_addr & TEXT_MASK) == TEXT_ADDR) begin
 			instr_mem_csb = mem_ren || mem_we;
 			instr_mem_web = mem_we;
 		end
-		if (mem_addr_r == INVMAT_L_ADDR)
-			mem_rdata = mat_inv_in_l;
-		else if (mem_addr_r == INVMAT_U_ADDR)
-			mem_rdata = mat_inv_in_u;
-		else if ((mem_addr_r & ADDR_MASK) == DATA_ADDR)
+		if ((mem_addr_r & DATA_MASK) == DATA_ADDR)
 			mem_rdata = data_mem_rdata;
-		else if ((mem_addr_r & ADDR_MASK) == TEXT_ADDR)
+		else if ((mem_addr_r & TEXT_MASK) == TEXT_ADDR)
 			mem_rdata = instr_mem_rdata;
+		else if (mem_addr_r == INVMAT_L_ADDR)
+			mem_rdata = mat_inv_out_l;
+		else if (mem_addr_r == INVMAT_U_ADDR)
+			mem_rdata = mat_inv_out_u;
 	end
 endmodule
 module mvp_core (
@@ -1563,10 +1886,8 @@ module mvp_core (
 	parameter EXP_WIDTH = 8;
 	parameter IEEE_COMPLIANCE = 0;
 	parameter VECTOR_LANES = 16;
-	parameter ADDR_WIDTH = 12;
 	parameter DATA_WIDTH = (SIG_WIDTH + EXP_WIDTH) + 1;
 	parameter INSTR_MEM_ADDR_WIDTH = 8;
-	parameter DATA_MEM_ADDR_WIDTH = 12;
 	parameter REG_BANK_DEPTH = 32;
 	parameter REG_ADDR_WIDTH = $clog2(REG_BANK_DEPTH);
 	input wire clk;
@@ -1574,7 +1895,7 @@ module mvp_core (
 	input wire en;
 	output wire [INSTR_MEM_ADDR_WIDTH - 1:0] pc;
 	input wire [31:0] instr;
-	output wire [ADDR_WIDTH - 1:0] mem_addr;
+	output wire [11:0] mem_addr;
 	output wire mem_ren;
 	output wire mem_we;
 	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata;
@@ -1585,8 +1906,6 @@ module mvp_core (
 	output wire [4:0] reg_wb;
 	reg en_q;
 	wire stall;
-	wire [4:0] opcode_id;
-	reg [4:0] opcode_ex1;
 	wire [4:0] vd_addr_id;
 	reg [4:0] vd_addr_ex1;
 	reg [4:0] vd_addr_ex2;
@@ -1608,14 +1927,16 @@ module mvp_core (
 	wire [DATA_WIDTH - 1:0] rs1_data_id;
 	wire [DATA_WIDTH - 1:0] rs2_data_id;
 	wire [DATA_WIDTH - 1:0] rs3_data_id;
+	wire [4:0] opcode_id;
+	reg [4:0] opcode_ex1;
 	wire [2:0] funct3_id;
 	reg [2:0] funct3_ex1;
-	wire [3:0] op_sel_id;
-	reg [3:0] op_sel_ex1;
-	reg [3:0] op_sel_ex2;
-	reg [3:0] op_sel_ex3;
-	reg [3:0] op_sel_ex4;
-	reg [3:0] op_sel_wb;
+	wire [4:0] wb_sel_id;
+	reg [4:0] wb_sel_ex1;
+	reg [4:0] wb_sel_ex2;
+	reg [4:0] wb_sel_ex3;
+	reg [4:0] wb_sel_ex4;
+	reg [4:0] wb_sel_wb;
 	wire reg_we_id;
 	reg reg_we_ex1;
 	reg reg_we_ex2;
@@ -1624,21 +1945,31 @@ module mvp_core (
 	reg reg_we_wb;
 	wire mem_we_id;
 	reg mem_we_ex1;
-	wire [ADDR_WIDTH - 1:0] mem_addr_id;
-	reg [ADDR_WIDTH - 1:0] mem_addr_ex1;
+	wire [11:0] mem_addr_id;
+	reg [11:0] mem_addr_ex1;
+	reg [11:0] mem_addr_ex2;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata_ex3;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata_ex4;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata_wb;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] reg_wdata_wb;
+	wire jump_id;
+	wire [INSTR_MEM_ADDR_WIDTH - 1:0] jump_addr_id;
+	wire [INSTR_MEM_ADDR_WIDTH - 1:0] jump_addr_ex2;
+	wire pc_sel;
+	wire branch_id;
+	reg branch_ex1;
+	reg branch_ex2;
 	assign data_out = reg_wdata_wb;
 	assign data_out_vld = en && reg_we_wb;
 	assign reg_wb = vd_addr_wb;
+	wire pipe_en;
+	assign pipe_en = en && (en_q || (pc != 0));
 	always @(posedge clk) begin
 		en_q <= en;
 		if (data_out_vld) begin
 			begin : sv2v_autoblock_1
 				reg signed [31:0] i;
-				for (i = VECTOR_LANES - 1; i >= 0; i = i - 1)
+				for (i = 8; i >= 0; i = i - 1)
 					$write("%h_", reg_wdata_wb[i * DATA_WIDTH+:DATA_WIDTH]);
 			end
 			$display;
@@ -1648,29 +1979,37 @@ module mvp_core (
 		.clk(clk),
 		.rst_n(rst_n),
 		.en(en & ~stall),
+		.branch(pc_sel),
+		.branch_offset(jump_addr_ex2),
+		.jump(jump_id),
+		.jump_addr(jump_addr_id),
 		.pc(pc)
 	);
+	assign jump_addr_id = mem_addr_id[INSTR_MEM_ADDR_WIDTH - 1:0];
+	assign jump_addr_ex2 = mem_addr_ex2[INSTR_MEM_ADDR_WIDTH - 1:0];
 	decoder decoder_inst(
 		.instr(instr),
-		.vfu_opcode(opcode_id),
 		.vd_addr(vd_addr_id),
 		.vs1_addr(vs1_addr_id),
 		.vs2_addr(vs2_addr_id),
 		.vs3_addr(vs3_addr_id),
-		.op_sel(op_sel_id),
-		.funct3(funct3_id),
-		.reg_we(reg_we_id),
-		.mem_we(mem_we_id),
 		.mem_addr(mem_addr_id),
+		.func_sel(opcode_id),
+		.funct3(funct3_id),
+		.wb_sel(wb_sel_id),
+		.mem_we(mem_we_id),
+		.reg_we(reg_we_id),
+		.jump(jump_id),
+		.branch(branch_id),
 		.vd_addr_ex1(vd_addr_ex1),
 		.vd_addr_ex2(vd_addr_ex2),
 		.vd_addr_ex3(vd_addr_ex3),
 		.reg_we_ex1(reg_we_ex1),
 		.reg_we_ex2(reg_we_ex2),
 		.reg_we_ex3(reg_we_ex3),
-		.op_sel_ex1(op_sel_ex1),
-		.op_sel_ex2(op_sel_ex2),
-		.op_sel_ex3(op_sel_ex3),
+		.wb_sel_ex1(wb_sel_ex1),
+		.wb_sel_ex2(wb_sel_ex2),
+		.wb_sel_ex3(wb_sel_ex3),
 		.stall(stall)
 	);
 	vrf #(
@@ -1680,7 +2019,7 @@ module mvp_core (
 	) vrf_inst(
 		.clk(clk),
 		.rst_n(rst_n),
-		.wen(reg_we_wb),
+		.wen(en && reg_we_wb),
 		.addr_w(vd_addr_wb),
 		.data_w(reg_wdata_wb),
 		.addr_r1(vs1_addr_id),
@@ -1707,17 +2046,19 @@ module mvp_core (
 	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage3_forward;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage4_forward;
 	assign stage2_forward = vec_out_ex2;
-	assign stage3_forward = (op_sel_ex3[3] ? mem_rdata_ex3 : vec_out_ex3);
+	assign stage3_forward = (wb_sel_ex3[0] ? vec_out_ex3 : mem_rdata_ex3);
 	always @(*)
-		case (op_sel_ex4)
-			4'b0001: stage4_forward = mfu_out_ex4;
-			4'b0010: stage4_forward = vfu_out_ex4;
-			4'b1000: stage4_forward = mem_rdata_ex4;
-			default: stage4_forward = vec_out_ex4;
+		case (wb_sel_ex4)
+			5'b00001: stage4_forward = vec_out_ex4;
+			5'b00010: stage4_forward = mem_rdata_ex4;
+			5'b00100: stage4_forward = vfu_out_ex4;
+			5'b01000: stage4_forward = mfu_out_ex4;
+			default: stage4_forward = 1'sb0;
 		endcase
-	assign operand_a = (((vs1_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && ~|op_sel_ex2 ? stage2_forward : (((vs1_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && ~|op_sel_ex3[2:0] ? stage3_forward : (((vs1_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~op_sel_ex4[2] ? stage4_forward : ((vs1_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs1_data_ex1))));
-	assign operand_b = (((vs2_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && ~|op_sel_ex2 ? stage2_forward : (((vs2_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && ~|op_sel_ex3[2:0] ? stage3_forward : (((vs2_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~op_sel_ex4[2] ? stage4_forward : ((vs2_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs2_data_ex1))));
-	assign operand_c = (((vs3_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && ~|op_sel_ex2 ? stage2_forward : (((vs3_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && ~|op_sel_ex3[2:0] ? stage3_forward : (((vs3_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~op_sel_ex4[2] ? stage4_forward : ((vs3_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs3_data_ex1))));
+	assign pc_sel = branch_ex2 && vec_out_ex2[0+:DATA_WIDTH];
+	assign operand_a = (((vs1_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && wb_sel_ex2[0] ? stage2_forward : (((vs1_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && |wb_sel_ex3[1:0] ? stage3_forward : (((vs1_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~wb_sel_ex4[4] ? stage4_forward : ((vs1_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs1_data_ex1))));
+	assign operand_b = (((vs2_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && wb_sel_ex2[0] ? stage2_forward : (((vs2_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && |wb_sel_ex3[1:0] ? stage3_forward : (((vs2_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~wb_sel_ex4[4] ? stage4_forward : ((vs2_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs2_data_ex1))));
+	assign operand_c = (((vs3_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && wb_sel_ex2[0] ? stage2_forward : (((vs3_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && |wb_sel_ex3[1:0] ? stage3_forward : (((vs3_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~wb_sel_ex4[4] ? stage4_forward : ((vs3_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs3_data_ex1))));
 	vector_unit #(
 		.SIG_WIDTH(SIG_WIDTH),
 		.EXP_WIDTH(EXP_WIDTH),
@@ -1725,12 +2066,14 @@ module mvp_core (
 		.VECTOR_LANES(VECTOR_LANES)
 	) vector_unit_inst(
 		.clk(clk),
-		.en(~|op_sel_ex1),
+		.en(wb_sel_ex1[0]),
 		.vec_a(operand_a),
 		.vec_b(operand_b),
+		.vec_c(operand_c),
 		.rnd(3'b000),
 		.opcode(opcode_ex1),
 		.funct(funct3_ex1),
+		.imm(vs1_addr_ex1),
 		.vec_out(vec_out_ex2)
 	);
 	vfpu #(
@@ -1741,7 +2084,7 @@ module mvp_core (
 		.NUM_STAGES(3)
 	) vfpu_inst(
 		.clk(clk),
-		.en(op_sel_ex1[1]),
+		.en(wb_sel_ex1[2]),
 		.vec_a(operand_a),
 		.vec_b(operand_b),
 		.vec_c(operand_c),
@@ -1749,22 +2092,6 @@ module mvp_core (
 		.opcode(opcode_ex1),
 		.funct(funct3_ex1),
 		.vec_out(vfu_out_ex4)
-	);
-	dot_product_unit #(
-		.SIG_WIDTH(SIG_WIDTH),
-		.EXP_WIDTH(EXP_WIDTH),
-		.IEEE_COMPLIANCE(IEEE_COMPLIANCE),
-		.VECTOR_LANES(9),
-		.NUM_STAGES(4)
-	) dp_unit_inst(
-		.clk(clk),
-		.en(op_sel_ex1[2]),
-		.vec_a(operand_a[0+:DATA_WIDTH * 9]),
-		.vec_b(operand_b[0+:DATA_WIDTH * 9]),
-		.vec_c(operand_c[0+:DATA_WIDTH * 9]),
-		.rnd(3'b000),
-		.funct(funct3_ex1),
-		.vec_out(mat_out_wb)
 	);
 	DW_lp_fp_multifunc_DG_inst_pipe #(
 		.SIG_WIDTH(SIG_WIDTH),
@@ -1776,65 +2103,85 @@ module mvp_core (
 		.inst_a(operand_a[0+:DATA_WIDTH]),
 		.inst_func(funct3_ex1),
 		.inst_rnd(3'b000),
-		.inst_DG_ctrl(op_sel_ex1[2]),
+		.inst_DG_ctrl(wb_sel_ex1[3]),
 		.z_inst(mfu_out_ex4),
 		.status_inst(status_inst)
 	);
+	dot_product_unit #(
+		.SIG_WIDTH(SIG_WIDTH),
+		.EXP_WIDTH(EXP_WIDTH),
+		.IEEE_COMPLIANCE(IEEE_COMPLIANCE),
+		.VECTOR_LANES(9),
+		.NUM_STAGES(4)
+	) dp_unit_inst(
+		.clk(clk),
+		.en(wb_sel_ex1[4]),
+		.vec_a(operand_a[0+:DATA_WIDTH * 9]),
+		.vec_b(operand_b[0+:DATA_WIDTH * 9]),
+		.vec_c(operand_c[0+:DATA_WIDTH * 9]),
+		.rnd(3'b000),
+		.funct(funct3_ex1),
+		.vec_out(mat_out_wb)
+	);
 	assign mem_addr = mem_addr_ex1;
-	assign mem_we = mem_we_ex1;
-	assign mem_ren = op_sel_ex1[3];
+	assign mem_we = mem_we_ex1 && en;
+	assign mem_ren = wb_sel_ex1[1] && en;
 	assign mem_wdata = operand_c;
 	assign width = funct3_ex1;
 	always @(*)
-		case (op_sel_wb)
-			4'b0001: reg_wdata_wb = mfu_out_wb;
-			4'b0010: reg_wdata_wb = vfu_out_wb;
-			4'b0100: reg_wdata_wb = mat_out_wb;
-			4'b1000: reg_wdata_wb = mem_rdata_wb;
-			default: reg_wdata_wb = vec_out_wb;
+		case (wb_sel_wb)
+			5'b00001: reg_wdata_wb = vec_out_wb;
+			5'b00010: reg_wdata_wb = mem_rdata_wb;
+			5'b00100: reg_wdata_wb = vfu_out_wb;
+			5'b01000: reg_wdata_wb = mfu_out_wb;
+			5'b10000: reg_wdata_wb = mat_out_wb;
+			default: reg_wdata_wb = 1'sb0;
 		endcase
 	always @(posedge clk)
 		if (~rst_n) begin
-			vs1_addr_ex1 <= 1'sb0;
-			vs2_addr_ex1 <= 1'sb0;
-			vs3_addr_ex1 <= 1'sb0;
-			opcode_ex1 <= 1'sb0;
-			funct3_ex1 <= 1'sb0;
-			vs1_data_ex1 <= 1'sb0;
-			vs2_data_ex1 <= 1'sb0;
-			vs3_data_ex1 <= 1'sb0;
-			vd_addr_ex1 <= 1'sb0;
-			vd_addr_ex2 <= 1'sb0;
-			vd_addr_ex3 <= 1'sb0;
-			vd_addr_ex4 <= 1'sb0;
-			vd_addr_wb <= 1'sb0;
-			op_sel_ex1 <= 1'sb0;
-			op_sel_ex2 <= 1'sb0;
-			op_sel_ex3 <= 1'sb0;
-			op_sel_ex4 <= 1'sb0;
-			op_sel_wb <= 1'sb0;
-			vec_out_ex3 <= 1'sb0;
-			vec_out_ex4 <= 1'sb0;
-			vec_out_wb <= 1'sb0;
-			vfu_out_wb <= 1'sb0;
-			mfu_out_wb <= 1'sb0;
-			reg_we_ex1 <= 1'sb0;
-			reg_we_ex2 <= 1'sb0;
-			reg_we_ex3 <= 1'sb0;
-			reg_we_ex4 <= 1'sb0;
-			reg_we_wb <= 1'sb0;
-			mem_addr_ex1 <= 1'sb0;
-			mem_we_ex1 <= 1'sb0;
-			mem_rdata_ex3 <= 1'sb0;
-			mem_rdata_ex4 <= 1'sb0;
-			mem_rdata_wb <= 1'sb0;
+			vs1_addr_ex1 <= 0;
+			vs2_addr_ex1 <= 0;
+			vs3_addr_ex1 <= 0;
+			mem_addr_ex1 <= 0;
+			mem_addr_ex2 <= 0;
+			vs1_data_ex1 <= 0;
+			vs2_data_ex1 <= 0;
+			vs3_data_ex1 <= 0;
+			vd_addr_ex1 <= 0;
+			vd_addr_ex2 <= 0;
+			vd_addr_ex3 <= 0;
+			vd_addr_ex4 <= 0;
+			vd_addr_wb <= 0;
+			opcode_ex1 <= 0;
+			funct3_ex1 <= 0;
+			mem_we_ex1 <= 0;
+			reg_we_ex1 <= 0;
+			reg_we_ex2 <= 0;
+			reg_we_ex3 <= 0;
+			reg_we_ex4 <= 0;
+			reg_we_wb <= 0;
+			wb_sel_ex1 <= 0;
+			wb_sel_ex2 <= 0;
+			wb_sel_ex3 <= 0;
+			wb_sel_ex4 <= 0;
+			wb_sel_wb <= 0;
+			branch_ex1 <= 0;
+			branch_ex2 <= 0;
+			vec_out_ex3 <= 0;
+			vec_out_ex4 <= 0;
+			vec_out_wb <= 0;
+			vfu_out_wb <= 0;
+			mfu_out_wb <= 0;
+			mem_rdata_ex3 <= 0;
+			mem_rdata_ex4 <= 0;
+			mem_rdata_wb <= 0;
 		end
-		else if (en && (en_q || (pc != 0))) begin
+		else if (pipe_en) begin
 			vs1_addr_ex1 <= vs1_addr_id;
 			vs2_addr_ex1 <= vs2_addr_id;
 			vs3_addr_ex1 <= vs3_addr_id;
-			opcode_ex1 <= opcode_id;
-			funct3_ex1 <= funct3_id;
+			mem_addr_ex1 <= mem_addr_id;
+			mem_addr_ex2 <= mem_addr_ex1;
 			vs1_data_ex1 <= vs1_data_id;
 			vs2_data_ex1 <= vs2_data_id;
 			vs3_data_ex1 <= vs3_data_id;
@@ -1843,23 +2190,26 @@ module mvp_core (
 			vd_addr_ex3 <= vd_addr_ex2;
 			vd_addr_ex4 <= vd_addr_ex3;
 			vd_addr_wb <= vd_addr_ex4;
-			op_sel_ex1 <= (~stall ? op_sel_id : {4 {1'sb0}});
-			op_sel_ex2 <= op_sel_ex1;
-			op_sel_ex3 <= op_sel_ex2;
-			op_sel_ex4 <= op_sel_ex3;
-			op_sel_wb <= op_sel_ex4;
-			vec_out_ex3 <= vec_out_ex2;
-			vec_out_ex4 <= vec_out_ex3;
-			vec_out_wb <= vec_out_ex4;
-			vfu_out_wb <= vfu_out_ex4;
-			mfu_out_wb <= mfu_out_ex4;
+			opcode_ex1 <= opcode_id;
+			funct3_ex1 <= funct3_id;
+			mem_we_ex1 <= mem_we_id && ~stall;
 			reg_we_ex1 <= reg_we_id && ~stall;
 			reg_we_ex2 <= reg_we_ex1;
 			reg_we_ex3 <= reg_we_ex2;
 			reg_we_ex4 <= reg_we_ex3;
 			reg_we_wb <= reg_we_ex4;
-			mem_addr_ex1 <= mem_addr_id;
-			mem_we_ex1 <= mem_we_id && ~stall;
+			wb_sel_ex1 <= (stall ? 5'b00000 : wb_sel_id);
+			wb_sel_ex2 <= wb_sel_ex1;
+			wb_sel_ex3 <= wb_sel_ex2;
+			wb_sel_ex4 <= wb_sel_ex3;
+			wb_sel_wb <= wb_sel_ex4;
+			branch_ex1 <= branch_id && ~stall;
+			branch_ex2 <= branch_ex1;
+			vec_out_ex3 <= vec_out_ex2;
+			vec_out_ex4 <= vec_out_ex3;
+			vec_out_wb <= vec_out_ex4;
+			vfu_out_wb <= vfu_out_ex4;
+			mfu_out_wb <= mfu_out_ex4;
 			mem_rdata_ex3 <= mem_rdata;
 			mem_rdata_ex4 <= mem_rdata_ex3;
 			mem_rdata_wb <= mem_rdata_ex4;
@@ -1912,7 +2262,7 @@ module ram_sync_1rw1r (
 					) sram_macro(
 						.clk0(clk),
 						.csb0(~(csb0 && (addr0[ADDR_WIDTH - 1:8] == i))),
-						.web0(~web0 && wmask0[j]),
+						.web0(~(web0 && wmask0[j])),
 						.wmask0(4'hf),
 						.addr0(addr0[7:0]),
 						.din0(din0[j * 32+:32]),
@@ -1936,7 +2286,7 @@ module ram_sync_1rw1r (
 				) sram_macro(
 					.clk0(clk),
 					.csb0(~csb0),
-					.web0(~web0 && wmask0[i]),
+					.web0(~(web0 && wmask0[i])),
 					.wmask0(4'hf),
 					.addr0(addr0),
 					.din0(din0[32 * i+:32]),
@@ -1986,6 +2336,30 @@ module regfile (
 			regs <= 1'sb0;
 		else if (wen)
 			regs[addr_w * DATA_WIDTH+:DATA_WIDTH] <= data_w;
+endmodule
+module skew_symmetric (
+	vec_a,
+	vec_out
+);
+	parameter DATA_WIDTH = 32;
+	input wire [(9 * DATA_WIDTH) - 1:0] vec_a;
+	output wire [(9 * DATA_WIDTH) - 1:0] vec_out;
+	wire [(9 * DATA_WIDTH) - 1:0] vec_a_neg;
+	genvar i;
+	generate
+		for (i = 0; i < 9; i = i + 1) begin : negate_inputs
+			assign vec_a_neg[i * DATA_WIDTH+:DATA_WIDTH] = {~vec_a[(i * DATA_WIDTH) + (DATA_WIDTH - 1)], vec_a[(i * DATA_WIDTH) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 2 : ((DATA_WIDTH - 2) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)) - 1)-:((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)]};
+		end
+	endgenerate
+	assign vec_out[0+:DATA_WIDTH] = 1'sb0;
+	assign vec_out[DATA_WIDTH+:DATA_WIDTH] = vec_a[2 * DATA_WIDTH+:DATA_WIDTH];
+	assign vec_out[2 * DATA_WIDTH+:DATA_WIDTH] = vec_a_neg[DATA_WIDTH+:DATA_WIDTH];
+	assign vec_out[3 * DATA_WIDTH+:DATA_WIDTH] = vec_a_neg[2 * DATA_WIDTH+:DATA_WIDTH];
+	assign vec_out[4 * DATA_WIDTH+:DATA_WIDTH] = 1'sb0;
+	assign vec_out[5 * DATA_WIDTH+:DATA_WIDTH] = vec_a[0+:DATA_WIDTH];
+	assign vec_out[6 * DATA_WIDTH+:DATA_WIDTH] = vec_a[DATA_WIDTH+:DATA_WIDTH];
+	assign vec_out[7 * DATA_WIDTH+:DATA_WIDTH] = vec_a_neg[0+:DATA_WIDTH];
+	assign vec_out[8 * DATA_WIDTH+:DATA_WIDTH] = 1'sb0;
 endmodule
 module square_PE_LU (
 	clk,
@@ -2100,43 +2474,15 @@ module square_PE_Tri (
 		.status()
 	);
 endmodule
-module vector_slide (
-	inst_a,
-	inst_b,
-	shift,
-	z_inst
-);
-	parameter DATA_WIDTH = 32;
-	parameter VECTOR_LANES = 16;
-	parameter WIDTH = $clog2(VECTOR_LANES);
-	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] inst_a;
-	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] inst_b;
-	input wire [WIDTH - 1:0] shift;
-	output wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] z_inst;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide8up;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide4up;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide2up;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide1up;
-	wire [VECTOR_LANES - 1:0] mask1;
-	wire [VECTOR_LANES - 1:0] mask2;
-	wire [VECTOR_LANES - 1:0] mask3;
-	wire [VECTOR_LANES - 1:0] mask4;
-	assign slide8up = (shift[3] ? {inst_a[0+:DATA_WIDTH * 8], {8 {32'b00000000000000000000000000000000}}} : inst_a);
-	assign slide4up = (shift[2] ? {slide8up[0+:DATA_WIDTH * 12], {4 {32'b00000000000000000000000000000000}}} : slide8up);
-	assign slide2up = (shift[1] ? {slide4up[0+:DATA_WIDTH * 14], {2 {32'b00000000000000000000000000000000}}} : slide4up);
-	assign slide1up = (shift[0] ? {slide2up[0+:DATA_WIDTH * 15], 32'b00000000000000000000000000000000} : slide1up);
-	assign mask1 = (shift[3] ? 16'hff00 : 16'h0001);
-	assign mask2 = (shift[2] ? {mask1[11:0], {4 {32'b00000000000000000000000000000000}}} : mask1);
-	assign mask3 = (shift[1] ? {mask2[13:0], {2 {32'b00000000000000000000000000000000}}} : mask2);
-	assign mask4 = (shift[0] ? {mask3[14:0], 32'b00000000000000000000000000000000} : mask3);
-endmodule
 module vector_unit (
 	clk,
 	en,
 	vec_a,
 	vec_b,
+	vec_c,
 	opcode,
 	funct,
+	imm,
 	rnd,
 	vec_out
 );
@@ -2149,96 +2495,79 @@ module vector_unit (
 	input wire en;
 	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_a;
 	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_b;
+	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_c;
 	input wire [4:0] opcode;
 	input wire [2:0] funct;
+	input wire [4:0] imm;
 	input wire [2:0] rnd;
 	output reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out;
-	wire [(9 * DATA_WIDTH) - 1:0] vec_a_neg;
-	wire [(9 * DATA_WIDTH) - 1:0] skew_symmetric;
+	wire [(9 * DATA_WIDTH) - 1:0] skew_mat;
 	wire [(9 * DATA_WIDTH) - 1:0] transpose;
-	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vpermute;
+	wire [(9 * DATA_WIDTH) - 1:0] identity;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vslide_up;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vslide_down;
+	skew_symmetric #(.DATA_WIDTH(DATA_WIDTH)) skew_symmetric_inst(
+		.vec_a(vec_a[0+:DATA_WIDTH * 9]),
+		.vec_out(skew_mat)
+	);
+	vslide_up #(.DATA_WIDTH(DATA_WIDTH)) vslide_up_inst(
+		.vsrc(vec_b),
+		.vdest(vec_c),
+		.shamt(imm),
+		.vec_out(vslide_up)
+	);
+	vslide_down #(.DATA_WIDTH(DATA_WIDTH)) vslide_down_inst(
+		.vsrc(vec_b),
+		.vdest(vec_c),
+		.shamt(imm),
+		.vec_out(vslide_down)
+	);
 	genvar i;
 	generate
-		for (i = 0; i < 9; i = i + 1) begin : negate_inputs
-			assign vec_a_neg[i * DATA_WIDTH+:DATA_WIDTH] = {~vec_a[(i * DATA_WIDTH) + (DATA_WIDTH - 1)], vec_a[(i * DATA_WIDTH) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 2 : ((DATA_WIDTH - 2) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)) - 1)-:((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)]};
-		end
-	endgenerate
-	assign skew_symmetric[0+:DATA_WIDTH] = 32'b00000000000000000000000000000000;
-	assign skew_symmetric[DATA_WIDTH+:DATA_WIDTH] = vec_a[2 * DATA_WIDTH+:DATA_WIDTH];
-	assign skew_symmetric[2 * DATA_WIDTH+:DATA_WIDTH] = vec_a_neg[DATA_WIDTH+:DATA_WIDTH];
-	assign skew_symmetric[3 * DATA_WIDTH+:DATA_WIDTH] = vec_a_neg[2 * DATA_WIDTH+:DATA_WIDTH];
-	assign skew_symmetric[4 * DATA_WIDTH+:DATA_WIDTH] = 32'b00000000000000000000000000000000;
-	assign skew_symmetric[5 * DATA_WIDTH+:DATA_WIDTH] = vec_a[0+:DATA_WIDTH];
-	assign skew_symmetric[6 * DATA_WIDTH+:DATA_WIDTH] = vec_a[DATA_WIDTH+:DATA_WIDTH];
-	assign skew_symmetric[7 * DATA_WIDTH+:DATA_WIDTH] = vec_a_neg[0+:DATA_WIDTH];
-	assign skew_symmetric[8 * DATA_WIDTH+:DATA_WIDTH] = 32'b00000000000000000000000000000000;
-	generate
-		for (i = 0; i < 3; i = i + 1) begin : genblk2
+		for (i = 0; i < 3; i = i + 1) begin : genblk1
 			genvar j;
 			for (j = 0; j < 3; j = j + 1) begin : genblk1
 				assign transpose[((3 * i) + j) * DATA_WIDTH+:DATA_WIDTH] = vec_a[((3 * j) + i) * DATA_WIDTH+:DATA_WIDTH];
 			end
 		end
 	endgenerate
-	always @(*)
-		case (funct)
-			3'b000: vpermute = skew_symmetric;
-			3'b001: vpermute = transpose;
-			default: vpermute = 1'sb0;
-		endcase
+	wire [EXP_WIDTH + SIG_WIDTH:0] one;
+	wire [EXP_WIDTH - 1:0] one_exp;
+	wire [SIG_WIDTH - 1:0] one_sig;
+	assign one_exp = (1 << (EXP_WIDTH - 1)) - 1;
+	assign one_sig = 0;
+	assign one = {1'b0, one_exp, one_sig};
+	assign identity = {one, 32'h00000000, 32'h00000000, 32'h00000000, one, 32'h00000000, 32'h00000000, 32'h00000000, one};
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vfpu;
 	generate
-		for (i = 0; i < VECTOR_LANES; i = i + 1) begin : genblk3
+		for (i = 0; i < VECTOR_LANES; i = i + 1) begin : genblk2
 			wire [DATA_WIDTH - 1:0] inst_a;
 			wire [DATA_WIDTH - 1:0] inst_b;
-			wire aeqb_inst;
-			wire altb_inst;
-			wire agtb_inst;
-			wire unordered_inst;
-			wire [DATA_WIDTH - 1:0] z0_inst;
-			wire [DATA_WIDTH - 1:0] z1_inst;
-			wire [7:0] status0_inst;
-			wire [7:0] status1_inst;
-			wire [DATA_WIDTH - 1:0] sgnj;
-			wire [DATA_WIDTH - 1:0] sgnjn;
-			wire [DATA_WIDTH - 1:0] sgnjx;
 			assign inst_a = (funct == 3'b101 ? vec_a[0+:DATA_WIDTH] : vec_a[i * DATA_WIDTH+:DATA_WIDTH]);
 			assign inst_b = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
-			DW_fp_cmp_DG #(
-				.sig_width(SIG_WIDTH),
-				.exp_width(EXP_WIDTH),
-				.ieee_compliance(IEEE_COMPLIANCE)
-			) DW_fp_cmp_DG_inst(
-				.a(inst_a),
-				.b(inst_b),
-				.zctr(1'b0),
-				.DG_ctrl(en),
-				.aeqb(aeqb_inst),
-				.altb(altb_inst),
-				.agtb(agtb_inst),
-				.unordered(unordered_inst),
-				.z0(z0_inst),
-				.z1(z1_inst),
-				.status0(status0_inst),
-				.status1(status1_inst)
+			fpu #(
+				.SIG_WIDTH(SIG_WIDTH),
+				.EXP_WIDTH(EXP_WIDTH),
+				.IEEE_COMPLIANCE(1)
+			) fpu_inst(
+				.inst_a(inst_a),
+				.inst_b(inst_b),
+				.inst_rnd(rnd),
+				.inst_DG_ctrl(en),
+				.opcode(opcode),
+				.z_inst(vfpu[i * DATA_WIDTH+:DATA_WIDTH])
 			);
-			assign sgnj = {inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
-			assign sgnjn = {~inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
-			assign sgnjx = {inst_a[DATA_WIDTH - 1] ^ inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
-			always @(posedge clk)
-				case (opcode)
-					5'b01000: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= z0_inst;
-					5'b01001: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= z1_inst;
-					5'b01101: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= aeqb_inst;
-					5'b01110: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= altb_inst;
-					5'b01111: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= aeqb_inst || altb_inst;
-					5'b01010: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= sgnj;
-					5'b01011: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= sgnjn;
-					5'b01100: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= sgnjx;
-					5'b10000: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= vpermute[i * DATA_WIDTH+:DATA_WIDTH];
-					default: vec_out[i * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-				endcase
 		end
 	endgenerate
+	always @(posedge clk)
+		case (opcode)
+			5'b10011: vec_out <= vslide_up;
+			5'b10100: vec_out <= vslide_down;
+			5'b10101: vec_out <= skew_mat;
+			5'b10110: vec_out <= transpose;
+			5'b10111: vec_out <= identity;
+			default: vec_out <= vfpu;
+		endcase
 endmodule
 module vfpu (
 	clk,
@@ -2276,23 +2605,46 @@ module vfpu (
 			wire [7:0] status_inst;
 			wire [DATA_WIDTH - 1:0] b_neg;
 			wire [DATA_WIDTH - 1:0] c_neg;
+			wire [EXP_WIDTH + SIG_WIDTH:0] one;
+			wire [EXP_WIDTH - 1:0] one_exp;
+			wire [SIG_WIDTH - 1:0] one_sig;
+			assign one_exp = (1 << (EXP_WIDTH - 1)) - 1;
+			assign one_sig = 0;
+			assign one = {1'b0, one_exp, one_sig};
 			assign b_neg = {~vec_b[(i * DATA_WIDTH) + (DATA_WIDTH - 1)], vec_b[(i * DATA_WIDTH) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 2 : ((DATA_WIDTH - 2) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)) - 1)-:((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)]};
 			assign c_neg = {~vec_c[(i * DATA_WIDTH) + (DATA_WIDTH - 1)], vec_c[(i * DATA_WIDTH) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 2 : ((DATA_WIDTH - 2) + ((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)) - 1)-:((DATA_WIDTH - 2) >= 0 ? DATA_WIDTH - 1 : 3 - DATA_WIDTH)]};
 			assign inst_a = (funct == 3'b101 ? vec_a[0+:DATA_WIDTH] : vec_a[i * DATA_WIDTH+:DATA_WIDTH]);
-			always @(*) begin
+			always @(*)
 				case (opcode)
-					5'b00000, 5'b00001: inst_b = 32'h3f800000;
-					5'b00110, 5'b00111: inst_b = b_neg;
-					default: inst_b = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
+					5'b00000: begin
+						inst_b = one;
+						inst_c = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
+					end
+					5'b00001: begin
+						inst_b = one;
+						inst_c = b_neg;
+					end
+					5'b00010: begin
+						inst_b = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
+						inst_c = 32'b00000000000000000000000000000000;
+					end
+					5'b00101: begin
+						inst_b = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
+						inst_c = c_neg;
+					end
+					5'b00110: begin
+						inst_b = b_neg;
+						inst_c = c_neg;
+					end
+					5'b00111: begin
+						inst_b = b_neg;
+						inst_c = vec_c[i * DATA_WIDTH+:DATA_WIDTH];
+					end
+					default: begin
+						inst_b = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
+						inst_c = vec_c[i * DATA_WIDTH+:DATA_WIDTH];
+					end
 				endcase
-				case (opcode)
-					5'b00000: inst_c = vec_b[i * DATA_WIDTH+:DATA_WIDTH];
-					5'b00001: inst_c = b_neg;
-					5'b00010: inst_c = 32'b00000000000000000000000000000000;
-					5'b00101, 5'b00110: inst_c = c_neg;
-					default: inst_c = vec_c[i * DATA_WIDTH+:DATA_WIDTH];
-				endcase
-			end
 			DW_fp_mac_DG_inst_pipe #(
 				.SIG_WIDTH(SIG_WIDTH),
 				.EXP_WIDTH(EXP_WIDTH),
@@ -2347,33 +2699,183 @@ module vrf (
 		sv2v_cast_A78C9 = inp;
 	endfunction
 	always @(posedge clk)
-		if (~rst_n) begin
-			vectors[0+:DATA_WIDTH] <= 1'sb0;
-			vectors[DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[2 * DATA_WIDTH+:DATA_WIDTH] <= 96'h3b6d800038a36038b8cbffed;
-			vectors[3 * DATA_WIDTH+:DATA_WIDTH] <= 128'h350eca6ab80e4003b7ac04fe3f800000;
-			vectors[4 * DATA_WIDTH+:DATA_WIDTH] <= 288'h3f8000000000000000000000000000003f8000000000000000000000000000003f800000;
-			vectors[5 * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[6 * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[7 * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[8 * DATA_WIDTH+:DATA_WIDTH] <= 288'h3f8000000000000000000000000000003f8000000000000000000000000000003f800000;
-			vectors[9 * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[10 * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[11 * DATA_WIDTH+:DATA_WIDTH] <= 1'sb0;
-			vectors[12 * DATA_WIDTH+:DATA_WIDTH] <= 288'h3f8000000000000000000000000000003f8000000000000000000000000000003f800000;
-			vectors[DATA_WIDTH * 13+:DATA_WIDTH * 3] <= {3 {sv2v_cast_A78C9(0)}};
-			vectors[16 * DATA_WIDTH+:DATA_WIDTH] <= 32'h348637bd;
-			vectors[17 * DATA_WIDTH+:DATA_WIDTH] <= 32'h3dcccccd;
-			vectors[18 * DATA_WIDTH+:DATA_WIDTH] <= 32'h420c0000;
-			vectors[19 * DATA_WIDTH+:DATA_WIDTH] <= 96'h411cf5c30000000000000000;
-			vectors[20 * DATA_WIDTH+:DATA_WIDTH] <= 288'h3f8000000000000000000000000000003f8000000000000000000000000000003f800000;
-			vectors[21 * DATA_WIDTH+:DATA_WIDTH] <= 32'h3ba3d70a;
-			vectors[22 * DATA_WIDTH+:DATA_WIDTH] <= 32'h37d1b717;
-			vectors[23 * DATA_WIDTH+:DATA_WIDTH] <= 32'h3751b717;
-			vectors[DATA_WIDTH * 24+:DATA_WIDTH * 8] <= {8 {sv2v_cast_A78C9(0)}};
-		end
+		if (~rst_n)
+			vectors <= {DEPTH {sv2v_cast_A78C9(0)}};
 		else if (wen)
 			vectors[addr_w * DATA_WIDTH+:DATA_WIDTH] <= data_w;
+endmodule
+module vslide_down (
+	vsrc,
+	vdest,
+	shamt,
+	vec_out
+);
+	parameter DATA_WIDTH = 32;
+	parameter VECTOR_LANES = 16;
+	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vsrc;
+	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vdest;
+	input wire [4:0] shamt;
+	output wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide8down;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide4down;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide2down;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide1down;
+	wire [VECTOR_LANES - 1:0] mask0;
+	wire [VECTOR_LANES - 1:0] mask1;
+	wire [VECTOR_LANES - 1:0] mask2;
+	wire [VECTOR_LANES - 1:0] mask3;
+	wire [VECTOR_LANES - 1:0] mask4;
+	assign slide8down = (shamt[3] ? {{8 {32'b00000000000000000000000000000000}}, vsrc[DATA_WIDTH * 8+:DATA_WIDTH * 8]} : vsrc);
+	assign slide4down = (shamt[2] ? {{4 {32'b00000000000000000000000000000000}}, slide8down[DATA_WIDTH * 4+:DATA_WIDTH * 12]} : slide8down);
+	assign slide2down = (shamt[1] ? {{2 {32'b00000000000000000000000000000000}}, slide4down[DATA_WIDTH * 2+:DATA_WIDTH * 14]} : slide4down);
+	assign slide1down = (shamt[0] ? {32'b00000000000000000000000000000000, slide2down[DATA_WIDTH+:DATA_WIDTH * 15]} : slide2down);
+	assign mask0 = 16'hffff;
+	assign mask1 = (shamt[3] ? {8'b00000000, mask0[15:8]} : mask0);
+	assign mask2 = (shamt[2] ? {4'b0000, mask1[15:4]} : mask1);
+	assign mask3 = (shamt[1] ? {2'b00, mask2[15:2]} : mask2);
+	assign mask4 = (shamt[0] ? {1'b0, mask3[15:1]} : mask3);
+	genvar i;
+	generate
+		for (i = 0; i < VECTOR_LANES; i = i + 1) begin : genblk1
+			assign vec_out[i * DATA_WIDTH+:DATA_WIDTH] = (mask4[i] ? slide1down[i * DATA_WIDTH+:DATA_WIDTH] : vdest[i * DATA_WIDTH+:DATA_WIDTH]);
+		end
+	endgenerate
+endmodule
+module vslide_up (
+	vsrc,
+	vdest,
+	shamt,
+	vec_out
+);
+	parameter DATA_WIDTH = 32;
+	parameter VECTOR_LANES = 16;
+	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vsrc;
+	input wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vdest;
+	input wire [4:0] shamt;
+	output wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide8up;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide4up;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide2up;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] slide1up;
+	wire [VECTOR_LANES - 1:0] mask0;
+	wire [VECTOR_LANES - 1:0] mask1;
+	wire [VECTOR_LANES - 1:0] mask2;
+	wire [VECTOR_LANES - 1:0] mask3;
+	wire [VECTOR_LANES - 1:0] mask4;
+	assign slide8up = (shamt[3] ? {vsrc[0+:DATA_WIDTH * 8], {8 {32'b00000000000000000000000000000000}}} : vsrc);
+	assign slide4up = (shamt[2] ? {slide8up[0+:DATA_WIDTH * 12], {4 {32'b00000000000000000000000000000000}}} : slide8up);
+	assign slide2up = (shamt[1] ? {slide4up[0+:DATA_WIDTH * 14], {2 {32'b00000000000000000000000000000000}}} : slide4up);
+	assign slide1up = (shamt[0] ? {slide2up[0+:DATA_WIDTH * 15], 32'b00000000000000000000000000000000} : slide2up);
+	assign mask0 = 16'hffff;
+	assign mask1 = (shamt[3] ? {mask0[7:0], 8'b00000000} : mask0);
+	assign mask2 = (shamt[2] ? {mask1[11:0], 4'b0000} : mask1);
+	assign mask3 = (shamt[1] ? {mask2[13:0], 2'b00} : mask2);
+	assign mask4 = (shamt[0] ? {mask3[14:0], 1'b0} : mask3);
+	genvar i;
+	generate
+		for (i = 0; i < VECTOR_LANES; i = i + 1) begin : genblk1
+			assign vec_out[i * DATA_WIDTH+:DATA_WIDTH] = (mask4[i] ? slide1up[i * DATA_WIDTH+:DATA_WIDTH] : vdest[i * DATA_WIDTH+:DATA_WIDTH]);
+		end
+	endgenerate
+endmodule
+module wishbone_ctl (
+	wb_clk_i,
+	wb_rst_i,
+	wbs_stb_i,
+	wbs_cyc_i,
+	wbs_we_i,
+	wbs_sel_i,
+	wbs_dat_i,
+	wbs_adr_i,
+	wbs_ack_o,
+	wbs_dat_o,
+	wbs_debug,
+	wbs_fsm_start,
+	wbs_fsm_done,
+	wbs_mem_we,
+	wbs_mem_ren,
+	wbs_mem_addr,
+	wbs_mem_wdata,
+	wbs_mem_rdata
+);
+	parameter WISHBONE_BASE_ADDR = 32'h30000000;
+	input wire wb_clk_i;
+	input wire wb_rst_i;
+	input wire wbs_stb_i;
+	input wire wbs_cyc_i;
+	input wire wbs_we_i;
+	input wire [3:0] wbs_sel_i;
+	input wire [31:0] wbs_dat_i;
+	input wire [31:0] wbs_adr_i;
+	output wire wbs_ack_o;
+	output reg [31:0] wbs_dat_o;
+	output reg wbs_debug;
+	output reg wbs_fsm_start;
+	input wire wbs_fsm_done;
+	output reg wbs_mem_we;
+	output wire wbs_mem_ren;
+	output reg [11:0] wbs_mem_addr;
+	output reg [31:0] wbs_mem_wdata;
+	input wire [31:0] wbs_mem_rdata;
+	localparam WBS_DEBUG_ADDR = 32'h30000000;
+	localparam WBS_FSM_START_ADDR = 32'h30000004;
+	localparam WBS_FSM_DONE_ADDR = 32'h30000008;
+	localparam WBS_MEM_MASK = 32'hffff0000;
+	localparam WBS_MEM_ADDR = 32'h30010000;
+	wire wbs_req = wbs_stb_i & wbs_cyc_i;
+	wire ack_o;
+	localparam SR_DEPTH = 4;
+	integer i;
+	reg [3:0] ack_o_shift_reg;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			ack_o_shift_reg <= {SR_DEPTH {1'b0}};
+		else begin
+			ack_o_shift_reg[0] <= wbs_req;
+			for (i = 0; i < 3; i = i + 1)
+				ack_o_shift_reg[i + 1] <= ack_o_shift_reg[i];
+		end
+	assign ack_o = ack_o_shift_reg[0];
+	wire wbs_req_write = (!ack_o & wbs_req) & wbs_we_i;
+	wire wbs_req_read = (!ack_o & wbs_req) & ~wbs_we_i;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			wbs_debug <= 0;
+		else if (wbs_req_write && (wbs_adr_i == WBS_DEBUG_ADDR))
+			wbs_debug <= wbs_dat_i[0];
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			wbs_fsm_start <= 0;
+		else if (wbs_req_write && (wbs_adr_i == WBS_FSM_START_ADDR))
+			wbs_fsm_start <= wbs_dat_i[0];
+		else
+			wbs_fsm_start <= 0;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i) begin
+			wbs_mem_we <= 1'b0;
+			wbs_mem_addr <= 12'b000000000000;
+			wbs_mem_wdata <= 0;
+		end
+		else if (wbs_req_write && ((wbs_adr_i & WBS_MEM_MASK) == WBS_MEM_ADDR)) begin
+			wbs_mem_we <= 1'b1;
+			wbs_mem_addr <= wbs_adr_i[13:2];
+			wbs_mem_wdata <= wbs_dat_i;
+		end
+		else
+			wbs_mem_we <= 1'b0;
+	reg [31:0] wbs_adr_i_q;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			wbs_adr_i_q <= 0;
+		else
+			wbs_adr_i_q <= wbs_adr_i;
+	always @(*) begin : blockName
+		if ((wbs_adr_i_q & WBS_MEM_MASK) == WBS_MEM_ADDR)
+			wbs_dat_o = wbs_mem_rdata;
+		else if (wbs_adr_i_q == WBS_FSM_DONE_ADDR)
+			wbs_dat_o = wbs_fsm_done;
+	end
+	assign wbs_ack_o = ack_o;
 endmodule
 module SizedFIFO (
 	CLK,
@@ -2474,36 +2976,85 @@ module SizedFIFO (
 		if ((!CLR && ENQ) && ((DEQ && !ring_empty) || ((!DEQ && hasodata) && not_ring_full)))
 			arr[tail] <= D_IN;
 	end
-	always @(posedge CLK) begin : error_checks
-		reg deqerror;
-		reg enqerror;
-		deqerror = 0;
-		enqerror = 0;
-		if (RST == 1'd1) begin
-			if (!EMPTY_N && DEQ) begin
-				deqerror = 1;
-				$display("Warning: SizedFIFO: %m -- Dequeuing from empty fifo");
-			end
-			if ((!FULL_N && ENQ) && (!DEQ || guarded)) begin
-				enqerror = 1;
-				$display("Warning: SizedFIFO: %m -- Enqueuing to a full fifo");
-			end
+endmodule
+module SyncBit (
+	sCLK,
+	sRST,
+	dCLK,
+	sEN,
+	sD_IN,
+	dD_OUT
+);
+	parameter init = 1'b0;
+	input sCLK;
+	input sRST;
+	input sEN;
+	input sD_IN;
+	input dCLK;
+	output wire dD_OUT;
+	reg sSyncReg;
+	reg dSyncReg1;
+	reg dSyncReg2;
+	assign dD_OUT = dSyncReg2;
+	always @(posedge sCLK or negedge sRST)
+		if (sRST == 1'b0)
+			sSyncReg <= init;
+		else if (sEN)
+			sSyncReg <= (sD_IN == 1'b1 ? 1'b1 : 1'b0);
+	always @(posedge dCLK or negedge sRST)
+		if (sRST == 1'b0) begin
+			dSyncReg1 <= init;
+			dSyncReg2 <= init;
 		end
+		else begin
+			dSyncReg1 <= sSyncReg;
+			dSyncReg2 <= dSyncReg1;
+		end
+	initial begin
+		sSyncReg = init;
+		dSyncReg1 = init;
+		dSyncReg2 = init;
 	end
-	// initial begin : parameter_assertions
-	// 	integer ok;
-	// 	ok = 1;
-	// 	if (p2depth <= 1) begin
-	// 		ok = 0;
-	// 		$display("Warning SizedFIFO: %m -- depth parameter increased from %0d to 2", p2depth);
-	// 	end
-	// 	if (p3cntr_width <= 0) begin
-	// 		ok = 0;
-	// 		$display("ERROR SizedFIFO: %m -- width parameter must be greater than 0");
-	// 	end
-	// 	if (ok == 0)
-	// 		$finish;
-	// end
+endmodule
+module SyncPulse (
+	sCLK,
+	sRST,
+	dCLK,
+	sEN,
+	dPulse
+);
+	input sCLK;
+	input sRST;
+	input sEN;
+	input dCLK;
+	output wire dPulse;
+	reg sSyncReg;
+	reg dSyncReg1;
+	reg dSyncReg2;
+	reg dSyncPulse;
+	assign dPulse = dSyncReg2 != dSyncPulse;
+	always @(posedge sCLK or negedge sRST)
+		if (sRST == 1'b0)
+			sSyncReg <= 1'b0;
+		else if (sEN)
+			sSyncReg <= !sSyncReg;
+	always @(posedge dCLK or negedge sRST)
+		if (sRST == 1'b0) begin
+			dSyncReg1 <= 1'b0;
+			dSyncReg2 <= 1'b0;
+			dSyncPulse <= 1'b0;
+		end
+		else begin
+			dSyncReg1 <= sSyncReg;
+			dSyncReg2 <= dSyncReg1;
+			dSyncPulse <= dSyncReg2;
+		end
+	initial begin
+		sSyncReg = 1'b0;
+		dSyncReg1 = 1'b0;
+		dSyncReg2 = 1'b0;
+		dSyncPulse = 1'b0;
+	end
 endmodule
 module aggregator (
 	clk,
@@ -2665,9 +3216,13 @@ module fifo (
 		.CLR(clr)
 	);
 endmodule
+
 `default_nettype none
+`define MPRJ_IO_PADS 38
+
 module user_proj_example #(
-    parameter BITS = 32
+    parameter BITS = 32,
+    parameter WISHBONE_BASE_ADDR = 32'h30000000
 ) (
 `ifdef USE_POWER_PINS
     inout vccd1,	// User area 1 1.8V supply
@@ -2709,64 +3264,143 @@ module user_proj_example #(
     output wire [2:0] user_irq
 );
 
-/*--------------------------------------*/
-/* User project is instantiated  here   */
-/*--------------------------------------*/
-  wire clk;
-  wire rst_n;
-  wire input_vld_w;
-  wire output_rdy_w;
-  wire [15 : 0] input_data_w;
+    wire        io_clk;
+    wire        io_rst_n;
+    wire        input_rdy_w;
+    wire        input_vld_w;
+    wire [15:0] input_data_w;
+    wire        output_rdy_w;
+    wire        output_vld_w;
+    wire [ 7:0] output_data_w;
 
-  wire output_vld_w;
-  wire input_rdy_w;
-  wire [7 : 0] output_data_w;
+    assign user_irq = 3'b0;
 
+    assign io_clk             = io_in[19];
+    assign io_rst_n           = io_in[0];
+    assign input_data_w[15:0] = io_in[16:1];
+    assign input_vld_w        = io_in[17];
+    assign output_rdy_w       = io_in[18];
 
-  accelerator accelerator_inst
-  (
-    `ifdef USE_POWER_PINS
-       .VDD(VDD),	// User area 1 1.8V power
-       .VSS(VSS),	// User area 1 digital ground
-     `endif
-    .clk(clk),
-    .rst_n(rst_n),
+    assign io_out[27:20] = output_data_w[7:0];
+    assign io_out[28]    = output_vld_w;
+    assign io_out[29]    = input_rdy_w;
 
-    .input_data(input_data_w),
-    .input_vld(input_vld_w),
-    .output_rdy(output_rdy_w),
-
-    .output_data(output_data_w),
-    .output_vld(output_vld_w),
-    .input_rdy(input_rdy_w)
-  );
+    assign io_out[`MPRJ_IO_PADS-1:30] = 8'b0;
+    assign io_out[19:0] = 20'b0;
+    assign io_oeb = {20'b0, {18{1'b1}}};
     
-    // assign io inputs to top level
-    assign clk = io_in[19];
-    assign rst_n = io_in[0];
-	assign input_data_w[0:15] = io_in[1:16];
-    // for (genvar i = 0; i < 16; i = i + 1) begin
-    //     assign input_data_w[i] = io_in[i + 1];
-    // end
-    assign input_vld_w = io_in[17];
-    assign output_rdy_w = io_in[18];
-    
-    // assign io outputs to top level
-	assign io_out[20:27]=output_data_w[0:7];
-    // for (genvar i = 20; i < 28; i = i + 1) begin
-    //     assign io_out[i] = output_data_w[i];
-    // end
-    assign io_out[28] = output_vld_w;
-    assign io_out[29] = input_rdy_w;
-
-    // set unused output ports to zeros
-    assign wbs_ack_o = 0;
-    assign wbs_dat_o = 32'd0;
     assign la_data_out = 128'd0;
-    assign io_out[`MPRJ_IO_PADS - 1 : 30] = 8'd0;
-    assign io_out[19 : 0] = 20'd0;
-    assign io_oeb = {20'b1, 18'b0};
-    assign user_irq = 3'd0;
+    
+
+// ==============================================================================
+// Wishbone control
+// ==============================================================================
+
+    wire        wbs_debug;
+    wire        wbs_fsm_start;
+    wire        wbs_fsm_done;
+
+    wire        wbs_debug_synced;
+    wire        wbs_fsm_start_synced;
+    wire        wbs_fsm_done_synced;
+
+    wire        wbs_mem_we;
+    wire        wbs_mem_ren;
+    wire [11:0] wbs_mem_addr;
+    wire [31:0] wbs_mem_wdata;
+    wire [31:0] wbs_mem_rdata;
+
+    // clock/reset mux
+    wire user_proj_clk;
+    wire user_proj_rst_n;
+
+    clock_mux #(2) clk_mux (
+        .clk        ({io_clk, wb_clk_i}),
+        .clk_select (wbs_debug ? 2'b01 : 2'b10),
+        .clk_out    (user_proj_clk)
+    );
+
+    assign user_proj_rst_n = (wbs_debug) ? ~wb_rst_i : io_rst_n;
+
+    wishbone_ctl #(
+        .WISHBONE_BASE_ADDR(WISHBONE_BASE_ADDR)
+    ) wbs_ctl_u0 (
+        // wishbone input
+        .wb_clk_i      (wb_clk_i     ),
+        .wb_rst_i      (wb_rst_i     ),
+        .wbs_stb_i     (wbs_stb_i    ),
+        .wbs_cyc_i     (wbs_cyc_i    ),
+        .wbs_we_i      (wbs_we_i     ),
+        .wbs_sel_i     (wbs_sel_i    ),
+        .wbs_dat_i     (wbs_dat_i    ),
+        .wbs_adr_i     (wbs_adr_i    ),
+        // wishbone output
+        .wbs_ack_o     (wbs_ack_o    ),
+        .wbs_dat_o     (wbs_dat_o    ),
+        // output
+        .wbs_debug     (wbs_debug    ),
+        .wbs_fsm_start (wbs_fsm_start),
+        .wbs_fsm_done  (wbs_fsm_done_synced),
+
+        .wbs_mem_we    (wbs_mem_we   ),
+        .wbs_mem_ren   (wbs_mem_ren  ),
+        .wbs_mem_addr  (wbs_mem_addr ),
+        .wbs_mem_wdata (wbs_mem_wdata),
+        .wbs_mem_rdata (wbs_mem_rdata)
+    );
+
+// ==============================================================================
+// IO Logic
+// ==============================================================================
+
+    accelerator acc_inst (
+        .clk           (user_proj_clk   ),
+        .rst_n         (user_proj_rst_n ),
+
+        .input_rdy     (input_rdy_w     ),
+        .input_vld     (input_vld_w     ),
+        .input_data    (input_data_w    ),
+
+        .output_rdy    (output_rdy_w    ),
+        .output_vld    (output_vld_w    ),
+        .output_data   (output_data_w   ),
+
+        .wbs_debug     (wbs_debug_synced    ),
+        .wbs_fsm_start (wbs_fsm_start_synced),
+        .wbs_fsm_done  (wbs_fsm_done    ),
+
+        .wbs_mem_we    (wbs_mem_we      ),
+        .wbs_mem_ren   (wbs_mem_ren     ),
+        .wbs_mem_addr  (wbs_mem_addr    ),
+        .wbs_mem_wdata (wbs_mem_wdata   ),
+        .wbs_mem_rdata (wbs_mem_rdata   )
+    );
+
+    SyncBit wbs_debug_sync (
+        .sCLK  (wb_clk_i            ),
+        .sRST  (~wb_rst_i           ),
+        .dCLK  (io_clk              ),
+        .sEN   (1'b1                ),
+        .sD_IN (wbs_debug           ),
+        .dD_OUT(wbs_debug_synced    )
+    );
+
+    SyncPulse wbs_fsm_start_sync (
+        .sCLK  (wb_clk_i            ),
+        .sRST  (~wb_rst_i           ),
+        .dCLK  (io_clk              ),
+        .sEN   (wbs_fsm_start       ),
+        .dPulse(wbs_fsm_start_synced)
+    );
+
+    SyncBit wbs_fsm_done_sync (
+        .sCLK  (io_clk              ),
+        .sRST  (io_rst_n            ),
+        .dCLK  (wb_clk_i            ),
+        .sEN   (1'b1                ),
+        .sD_IN (wbs_fsm_done        ),
+        .dD_OUT(wbs_fsm_done_synced )
+    );
 
 endmodule
 
