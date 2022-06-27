@@ -1,3 +1,189 @@
+module user_proj_example #(
+    parameter BITS = 32
+) (
+`ifdef USE_POWER_PINS
+    inout vccd1,	// User area 1 1.8V supply
+    inout vssd1,	// User area 1 digital ground
+`endif
+
+    // Wishbone Slave ports (WB MI A)
+    input wire wb_clk_i,
+    input wire wb_rst_i,
+    input wire wbs_stb_i,
+    input wire wbs_cyc_i,
+    input wire wbs_we_i,
+    input wire [3:0] wbs_sel_i,
+    input wire [31:0] wbs_dat_i,
+    input wire [31:0] wbs_adr_i,
+    output wire wbs_ack_o,
+    output wire [31:0] wbs_dat_o,
+
+    // Logic Analyzer Signals
+    input  wire [127:0] la_data_in,
+    output wire [127:0] la_data_out,
+    input  wire [127:0] la_oenb,
+
+    // IOs
+    input  wire [`MPRJ_IO_PADS-1:0] io_in,
+    output wire [`MPRJ_IO_PADS-1:0] io_out,
+    output wire [`MPRJ_IO_PADS-1:0] io_oeb,
+
+    // Analog (direct connection to GPIO pad---use with caution)
+    // Note that analog I/O is not available on the 7 lowest-numbered
+    // GPIO pads, and so the analog_io indexing is offset from the
+    // GPIO indexing by 7 (also upper 2 GPIOs do not have analog_io).
+    inout wire [`MPRJ_IO_PADS-10:0] analog_io,
+
+    // Independent clock (on independent integer divider)
+    input wire user_clock2,
+
+    // User maskable interrupt signals
+    output wire [2:0] user_irq
+);
+
+    wire        io_clk;
+    wire        io_rst_n;
+    wire        input_rdy_w;
+    wire        input_vld_w;
+    wire [15:0] input_data_w;
+    wire        output_rdy_w;
+    wire        output_vld_w;
+    wire [15:0] output_data_w;
+
+    assign user_irq = 3'b0;
+
+    assign io_clk       = io_in[37];
+    assign io_rst_n     = io_in[36];
+    assign input_data_w = io_in[15:0];
+    assign input_vld_w  = io_in[16];
+    assign output_rdy_w = io_in[17];
+
+    assign io_out[17:0]  = 18'b0;
+    assign io_out[33:18] = output_data_w;
+    // assign io_out[33:26] = 8'b0; // reserved for output
+    assign io_out[34]    = output_vld_w;
+    assign io_out[35]    = input_rdy_w;
+    assign io_out[37:36] = 2'b0;
+
+    // input - 1 output - 0
+    assign io_oeb[17:0]  = {18{1'b1}};
+    assign io_oeb[35:18] = 18'b0;
+    assign io_oeb[37:36] = {2{1'b1}};
+
+    assign la_data_out = 128'd0;
+
+// ==============================================================================
+// Wishbone control
+// ==============================================================================
+
+    wire        wbs_debug;
+    wire        wbs_fsm_start;
+    wire        wbs_fsm_done;
+
+    wire        wbs_debug_synced;
+    wire        wbs_fsm_start_synced;
+    wire        wbs_fsm_done_synced;
+
+    wire        wbs_mem_we;
+    wire        wbs_mem_ren;
+    wire [11:0] wbs_mem_addr;
+    wire [31:0] wbs_mem_wdata;
+    wire [31:0] wbs_mem_rdata;
+
+    // clock/reset mux
+    wire user_proj_clk;
+    wire user_proj_rst_n;
+
+    clock_mux #(2) clk_mux (
+        .clk        ( {io_clk, wb_clk_i}        ),
+        .clk_select ( wbs_debug ? 2'b01 : 2'b10 ),
+        .clk_out    ( user_proj_clk             )
+    );
+
+    assign user_proj_rst_n = (wbs_debug) ? ~wb_rst_i : io_rst_n;
+
+    wishbone_ctl wbs_ctl_u0 (
+        // wishbone input
+        .wb_clk_i      (wb_clk_i            ),
+        .wb_rst_i      (wb_rst_i            ),
+        .wbs_stb_i     (wbs_stb_i           ),
+        .wbs_cyc_i     (wbs_cyc_i           ),
+        .wbs_we_i      (wbs_we_i            ),
+        .wbs_sel_i     (wbs_sel_i           ),
+        .wbs_dat_i     (wbs_dat_i           ),
+        .wbs_adr_i     (wbs_adr_i           ),
+        // wishbone output
+        .wbs_ack_o     (wbs_ack_o           ),
+        .wbs_dat_o     (wbs_dat_o           ),
+        // output
+        .wbs_debug     (wbs_debug           ),
+        .wbs_fsm_start (wbs_fsm_start       ),
+        .wbs_fsm_done  (wbs_fsm_done_synced ),
+
+        .wbs_mem_we    (wbs_mem_we          ),
+        .wbs_mem_ren   (wbs_mem_ren         ),
+        .wbs_mem_addr  (wbs_mem_addr        ),
+        .wbs_mem_wdata (wbs_mem_wdata       ),
+        .wbs_mem_rdata (wbs_mem_rdata       )
+    );
+
+// ==============================================================================
+// IO Logic
+// ==============================================================================
+
+    accelerator acc_inst (
+        .clk           (user_proj_clk       ),
+        .rst_n         (user_proj_rst_n     ),
+
+        .input_rdy     (input_rdy_w         ),
+        .input_vld     (input_vld_w         ),
+        .input_data    (input_data_w        ),
+
+        .output_rdy    (output_rdy_w        ),
+        .output_vld    (output_vld_w        ),
+        .output_data   (output_data_w       ),
+
+        .wbs_debug     (wbs_debug_synced    ),
+        .wbs_fsm_start (wbs_fsm_start_synced),
+        .wbs_fsm_done  (wbs_fsm_done        ),
+
+        .wbs_mem_we    (wbs_mem_we          ),
+        .wbs_mem_ren   (wbs_mem_ren         ),
+        .wbs_mem_addr  (wbs_mem_addr        ),
+        .wbs_mem_wdata (wbs_mem_wdata       ),
+        .wbs_mem_rdata (wbs_mem_rdata       )
+    );
+
+    SyncBit wbs_debug_sync (
+        .sCLK          (wb_clk_i            ),
+        .sRST          (~wb_rst_i           ),
+        .dCLK          (io_clk              ),
+        .sEN           (1'b1                ),
+        .sD_IN         (wbs_debug           ),
+        .dD_OUT        (wbs_debug_synced    )
+    );
+
+    SyncPulse wbs_fsm_start_sync (
+        .sCLK          (wb_clk_i            ),
+        .sRST          (~wb_rst_i           ),
+        .dCLK          (io_clk              ),
+        .sEN           (wbs_fsm_start       ),
+        .dPulse        (wbs_fsm_start_synced)
+    );
+
+    SyncBit wbs_fsm_done_sync (
+        .sCLK          (io_clk              ),
+        .sRST          (io_rst_n            ),
+        .dCLK          (wb_clk_i            ),
+        .sEN           (1'b1                ),
+        .sD_IN         (wbs_fsm_done        ),
+        .dD_OUT        (wbs_fsm_done_synced )
+    );
+
+endmodule
+
+`default_nettype wire
+
 module DW_fp_dp4_inst_pipe (
 	inst_clk,
 	inst_a,
@@ -577,7 +763,7 @@ module accelerator (
 	parameter EXP_WIDTH = 8;
 	parameter IEEE_COMPLIANCE = 0;
 	parameter INPUT_FIFO_WIDTH = 16;
-	parameter OUTPUT_FIFO_WIDTH = 8;
+	parameter OUTPUT_FIFO_WIDTH = 16;
 	parameter CONFIG_DATA_WIDTH = 16;
 	parameter VECTOR_LANES = 16;
 	parameter DATAPATH = 256;
@@ -1230,8 +1416,7 @@ module decoder (
 	assign masking = instr[25];
 	assign funct6 = instr[31:26];
 	assign branch_offset = {instr[31:25], instr[11:7]};
-	wire overwrite_multiplicand;
-	assign overwrite_multiplicand = (((opcode == 6'b101100) || (opcode == 6'b101110)) || (opcode == 6'b101101)) || (opcode == 6'b101111);
+	wire overwrite_multiplicand = (((opcode == 6'b101100) || (opcode == 6'b101110)) || (opcode == 6'b101101)) || (opcode == 6'b101111);
 	assign vs1_addr = src1;
 	assign vs2_addr = (overwrite_multiplicand ? dest : src2);
 	assign vs3_addr = (opcode == 7'b0001011 ? instr[31:27] : (overwrite_multiplicand ? src2 : dest));
@@ -1244,7 +1429,6 @@ module decoder (
 			13'b1010111000110: func_sel = 5'b01001;
 			13'b1010111001000: func_sel = 5'b01010;
 			13'b1010111001001: func_sel = 5'b01011;
-			13'b1010111001010: func_sel = 5'b01100;
 			13'b1010111001010: func_sel = 5'b01100;
 			13'b1010111001110: func_sel = 5'b10011;
 			13'b1010111001111: func_sel = 5'b10100;
@@ -1506,12 +1690,9 @@ module fpu (
 	assign sgnj = {inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
 	assign sgnjn = {~inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
 	assign sgnjx = {inst_a[DATA_WIDTH - 1] ^ inst_b[DATA_WIDTH - 1], inst_a[DATA_WIDTH - 2:0]};
-	wire zero_sig;
-	assign zero_sig = inst_b[SIG_WIDTH - 1:0] == 0;
-	wire zero_exp;
-	assign zero_exp = inst_b[SIG_WIDTH+:EXP_WIDTH] == 0;
-	wire nan_exp;
-	assign nan_exp = &inst_b[SIG_WIDTH+:EXP_WIDTH];
+	wire zero_sig = inst_b[SIG_WIDTH - 1:0] == 0;
+	wire zero_exp = inst_b[SIG_WIDTH+:EXP_WIDTH] == 0;
+	wire nan_exp = &inst_b[SIG_WIDTH+:EXP_WIDTH];
 	assign fclass_mask[0] = (inst_b[31] && nan_exp) && zero_sig;
 	assign fclass_mask[1] = (inst_b[31] && ~nan_exp) && ~zero_exp;
 	assign fclass_mask[2] = (inst_b[31] && zero_exp) && ~zero_sig;
@@ -1838,7 +2019,6 @@ module memory_controller (
 		endcase
 		data_mem_wmask = data_mem_wmask << mem_addr[2:0];
 		case (mem_addr[2:0])
-			3'b000: data_mem_wdata = mem_wdata;
 			3'b001: data_mem_wdata = mem_wdata << 32;
 			3'b010: data_mem_wdata = mem_wdata << 64;
 			3'b011: data_mem_wdata = mem_wdata << 96;
@@ -1846,7 +2026,7 @@ module memory_controller (
 			3'b101: data_mem_wdata = mem_wdata << 160;
 			3'b110: data_mem_wdata = mem_wdata << 192;
 			3'b111: data_mem_wdata = mem_wdata << 224;
-			default: data_mem_wdata = 1'sb0;
+			default: data_mem_wdata = mem_wdata;
 		endcase
 		if ((mem_addr & DATA_MASK) == DATA_ADDR) begin
 			data_mem_csb = mem_ren || mem_we;
@@ -1864,6 +2044,8 @@ module memory_controller (
 			mem_rdata = mat_inv_out_l;
 		else if (mem_addr_r == INVMAT_U_ADDR)
 			mem_rdata = mat_inv_out_u;
+		else
+			mem_rdata = 0;
 	end
 endmodule
 module mvp_core (
@@ -2139,42 +2321,42 @@ module mvp_core (
 		endcase
 	always @(posedge clk)
 		if (~rst_n) begin
-			vs1_addr_ex1 <= 0;
-			vs2_addr_ex1 <= 0;
-			vs3_addr_ex1 <= 0;
-			mem_addr_ex1 <= 0;
-			mem_addr_ex2 <= 0;
-			vs1_data_ex1 <= 0;
-			vs2_data_ex1 <= 0;
-			vs3_data_ex1 <= 0;
-			vd_addr_ex1 <= 0;
-			vd_addr_ex2 <= 0;
-			vd_addr_ex3 <= 0;
-			vd_addr_ex4 <= 0;
-			vd_addr_wb <= 0;
-			opcode_ex1 <= 0;
-			funct3_ex1 <= 0;
-			mem_we_ex1 <= 0;
-			reg_we_ex1 <= 0;
-			reg_we_ex2 <= 0;
-			reg_we_ex3 <= 0;
-			reg_we_ex4 <= 0;
-			reg_we_wb <= 0;
-			wb_sel_ex1 <= 0;
-			wb_sel_ex2 <= 0;
-			wb_sel_ex3 <= 0;
-			wb_sel_ex4 <= 0;
-			wb_sel_wb <= 0;
-			branch_ex1 <= 0;
-			branch_ex2 <= 0;
-			vec_out_ex3 <= 0;
-			vec_out_ex4 <= 0;
-			vec_out_wb <= 0;
-			vfu_out_wb <= 0;
-			mfu_out_wb <= 0;
-			mem_rdata_ex3 <= 0;
-			mem_rdata_ex4 <= 0;
-			mem_rdata_wb <= 0;
+			vs1_addr_ex1 <= 1'sb0;
+			vs2_addr_ex1 <= 1'sb0;
+			vs3_addr_ex1 <= 1'sb0;
+			mem_addr_ex1 <= 1'sb0;
+			mem_addr_ex2 <= 1'sb0;
+			vs1_data_ex1 <= 1'sb0;
+			vs2_data_ex1 <= 1'sb0;
+			vs3_data_ex1 <= 1'sb0;
+			vd_addr_ex1 <= 1'sb0;
+			vd_addr_ex2 <= 1'sb0;
+			vd_addr_ex3 <= 1'sb0;
+			vd_addr_ex4 <= 1'sb0;
+			vd_addr_wb <= 1'sb0;
+			opcode_ex1 <= 1'sb0;
+			funct3_ex1 <= 1'sb0;
+			mem_we_ex1 <= 1'sb0;
+			reg_we_ex1 <= 1'sb0;
+			reg_we_ex2 <= 1'sb0;
+			reg_we_ex3 <= 1'sb0;
+			reg_we_ex4 <= 1'sb0;
+			reg_we_wb <= 1'sb0;
+			wb_sel_ex1 <= 1'sb0;
+			wb_sel_ex2 <= 1'sb0;
+			wb_sel_ex3 <= 1'sb0;
+			wb_sel_ex4 <= 1'sb0;
+			wb_sel_wb <= 1'sb0;
+			branch_ex1 <= 1'sb0;
+			branch_ex2 <= 1'sb0;
+			vec_out_ex3 <= 1'sb0;
+			vec_out_ex4 <= 1'sb0;
+			vec_out_wb <= 1'sb0;
+			vfu_out_wb <= 1'sb0;
+			mfu_out_wb <= 1'sb0;
+			mem_rdata_ex3 <= 1'sb0;
+			mem_rdata_ex4 <= 1'sb0;
+			mem_rdata_wb <= 1'sb0;
 		end
 		else if (pipe_en) begin
 			vs1_addr_ex1 <= vs1_addr_id;
@@ -2728,7 +2910,7 @@ module vslide_down (
 	assign slide8down = (shamt[3] ? {{8 {32'b00000000000000000000000000000000}}, vsrc[DATA_WIDTH * 8+:DATA_WIDTH * 8]} : vsrc);
 	assign slide4down = (shamt[2] ? {{4 {32'b00000000000000000000000000000000}}, slide8down[DATA_WIDTH * 4+:DATA_WIDTH * 12]} : slide8down);
 	assign slide2down = (shamt[1] ? {{2 {32'b00000000000000000000000000000000}}, slide4down[DATA_WIDTH * 2+:DATA_WIDTH * 14]} : slide4down);
-	assign slide1down = (shamt[0] ? {32'b00000000000000000000000000000000, slide2down[DATA_WIDTH+:DATA_WIDTH * 15]} : slide2down);
+	assign slide1down = (shamt[0] ? {32'b00000000000000000000000000000000, slide2down[DATA_WIDTH * 1+:DATA_WIDTH * 15]} : slide2down);
 	assign mask0 = 16'hffff;
 	assign mask1 = (shamt[3] ? {8'b00000000, mask0[15:8]} : mask0);
 	assign mask2 = (shamt[2] ? {4'b0000, mask1[15:4]} : mask1);
@@ -2869,12 +3051,11 @@ module wishbone_ctl (
 			wbs_adr_i_q <= 0;
 		else
 			wbs_adr_i_q <= wbs_adr_i;
-	always @(*) begin : blockName
+	always @(*)
 		if ((wbs_adr_i_q & WBS_MEM_MASK) == WBS_MEM_ADDR)
 			wbs_dat_o = wbs_mem_rdata;
 		else if (wbs_adr_i_q == WBS_FSM_DONE_ADDR)
 			wbs_dat_o = wbs_fsm_done;
-	end
 	assign wbs_ack_o = ack_o;
 endmodule
 module SizedFIFO (
@@ -3216,192 +3397,4 @@ module fifo (
 		.CLR(clr)
 	);
 endmodule
-
 `default_nettype none
-`define MPRJ_IO_PADS 38
-
-module user_proj_example #(
-    parameter BITS = 32,
-    parameter WISHBONE_BASE_ADDR = 32'h30000000
-) (
-`ifdef USE_POWER_PINS
-    inout vccd1,	// User area 1 1.8V supply
-    inout vssd1,	// User area 1 digital ground
-`endif
-
-    // Wishbone Slave ports (WB MI A)
-    input wire wb_clk_i,
-    input wire wb_rst_i,
-    input wire wbs_stb_i,
-    input wire wbs_cyc_i,
-    input wire wbs_we_i,
-    input wire [3:0] wbs_sel_i,
-    input wire [31:0] wbs_dat_i,
-    input wire [31:0] wbs_adr_i,
-    output wire wbs_ack_o,
-    output wire [31:0] wbs_dat_o,
-
-    // Logic Analyzer Signals
-    input  wire [127:0] la_data_in,
-    output wire [127:0] la_data_out,
-    input  wire [127:0] la_oenb,
-
-    // IOs
-    input  wire [`MPRJ_IO_PADS-1:0] io_in,
-    output wire [`MPRJ_IO_PADS-1:0] io_out,
-    output wire [`MPRJ_IO_PADS-1:0] io_oeb,
-
-    // Analog (direct connection to GPIO pad---use with caution)
-    // Note that analog I/O is not available on the 7 lowest-numbered
-    // GPIO pads, and so the analog_io indexing is offset from the
-    // GPIO indexing by 7 (also upper 2 GPIOs do not have analog_io).
-    inout wire [`MPRJ_IO_PADS-10:0] analog_io,
-
-    // Independent clock (on independent integer divider)
-    input wire user_clock2,
-
-    // User maskable interrupt signals
-    output wire [2:0] user_irq
-);
-
-    wire        io_clk;
-    wire        io_rst_n;
-    wire        input_rdy_w;
-    wire        input_vld_w;
-    wire [15:0] input_data_w;
-    wire        output_rdy_w;
-    wire        output_vld_w;
-    wire [ 7:0] output_data_w;
-
-    assign user_irq = 3'b0;
-
-    assign io_clk             = io_in[19];
-    assign io_rst_n           = io_in[0];
-    assign input_data_w[15:0] = io_in[16:1];
-    assign input_vld_w        = io_in[17];
-    assign output_rdy_w       = io_in[18];
-
-    assign io_out[27:20] = output_data_w[7:0];
-    assign io_out[28]    = output_vld_w;
-    assign io_out[29]    = input_rdy_w;
-
-    assign io_out[`MPRJ_IO_PADS-1:30] = 8'b0;
-    assign io_out[19:0] = 20'b0;
-    assign io_oeb = {20'b0, {18{1'b1}}};
-    
-    assign la_data_out = 128'd0;
-    
-
-// ==============================================================================
-// Wishbone control
-// ==============================================================================
-
-    wire        wbs_debug;
-    wire        wbs_fsm_start;
-    wire        wbs_fsm_done;
-
-    wire        wbs_debug_synced;
-    wire        wbs_fsm_start_synced;
-    wire        wbs_fsm_done_synced;
-
-    wire        wbs_mem_we;
-    wire        wbs_mem_ren;
-    wire [11:0] wbs_mem_addr;
-    wire [31:0] wbs_mem_wdata;
-    wire [31:0] wbs_mem_rdata;
-
-    // clock/reset mux
-    wire user_proj_clk;
-    wire user_proj_rst_n;
-
-    clock_mux #(2) clk_mux (
-        .clk        ({io_clk, wb_clk_i}),
-        .clk_select (wbs_debug ? 2'b01 : 2'b10),
-        .clk_out    (user_proj_clk)
-    );
-
-    assign user_proj_rst_n = (wbs_debug) ? ~wb_rst_i : io_rst_n;
-
-    wishbone_ctl #(
-        .WISHBONE_BASE_ADDR(WISHBONE_BASE_ADDR)
-    ) wbs_ctl_u0 (
-        // wishbone input
-        .wb_clk_i      (wb_clk_i     ),
-        .wb_rst_i      (wb_rst_i     ),
-        .wbs_stb_i     (wbs_stb_i    ),
-        .wbs_cyc_i     (wbs_cyc_i    ),
-        .wbs_we_i      (wbs_we_i     ),
-        .wbs_sel_i     (wbs_sel_i    ),
-        .wbs_dat_i     (wbs_dat_i    ),
-        .wbs_adr_i     (wbs_adr_i    ),
-        // wishbone output
-        .wbs_ack_o     (wbs_ack_o    ),
-        .wbs_dat_o     (wbs_dat_o    ),
-        // output
-        .wbs_debug     (wbs_debug    ),
-        .wbs_fsm_start (wbs_fsm_start),
-        .wbs_fsm_done  (wbs_fsm_done_synced),
-
-        .wbs_mem_we    (wbs_mem_we   ),
-        .wbs_mem_ren   (wbs_mem_ren  ),
-        .wbs_mem_addr  (wbs_mem_addr ),
-        .wbs_mem_wdata (wbs_mem_wdata),
-        .wbs_mem_rdata (wbs_mem_rdata)
-    );
-
-// ==============================================================================
-// IO Logic
-// ==============================================================================
-
-    accelerator acc_inst (
-        .clk           (user_proj_clk   ),
-        .rst_n         (user_proj_rst_n ),
-
-        .input_rdy     (input_rdy_w     ),
-        .input_vld     (input_vld_w     ),
-        .input_data    (input_data_w    ),
-
-        .output_rdy    (output_rdy_w    ),
-        .output_vld    (output_vld_w    ),
-        .output_data   (output_data_w   ),
-
-        .wbs_debug     (wbs_debug_synced    ),
-        .wbs_fsm_start (wbs_fsm_start_synced),
-        .wbs_fsm_done  (wbs_fsm_done    ),
-
-        .wbs_mem_we    (wbs_mem_we      ),
-        .wbs_mem_ren   (wbs_mem_ren     ),
-        .wbs_mem_addr  (wbs_mem_addr    ),
-        .wbs_mem_wdata (wbs_mem_wdata   ),
-        .wbs_mem_rdata (wbs_mem_rdata   )
-    );
-
-    SyncBit wbs_debug_sync (
-        .sCLK  (wb_clk_i            ),
-        .sRST  (~wb_rst_i           ),
-        .dCLK  (io_clk              ),
-        .sEN   (1'b1                ),
-        .sD_IN (wbs_debug           ),
-        .dD_OUT(wbs_debug_synced    )
-    );
-
-    SyncPulse wbs_fsm_start_sync (
-        .sCLK  (wb_clk_i            ),
-        .sRST  (~wb_rst_i           ),
-        .dCLK  (io_clk              ),
-        .sEN   (wbs_fsm_start       ),
-        .dPulse(wbs_fsm_start_synced)
-    );
-
-    SyncBit wbs_fsm_done_sync (
-        .sCLK  (io_clk              ),
-        .sRST  (io_rst_n            ),
-        .dCLK  (wb_clk_i            ),
-        .sEN   (1'b1                ),
-        .sD_IN (wbs_fsm_done        ),
-        .dD_OUT(wbs_fsm_done_synced )
-    );
-
-endmodule
-
-`default_nettype wire

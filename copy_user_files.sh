@@ -3,7 +3,7 @@
 # Setting paths
 top="user_proj_example"
 base_dir="/home/users/yuchenm/ee372/esekf-v2-20MHz/accelerator"
-build_target="build"
+build_target="build-v2-final"
 
 # gds_path="$base_dir/$build_target/*-gdsmerge/design_merged.gds"
 gds_path="$base_dir/$build_target/*-signoff/outputs/design-merged.gds"
