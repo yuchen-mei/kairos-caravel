@@ -2,8 +2,8 @@
 
 # Setting paths
 top="user_proj_example"
-base_dir="/home/users/yuchenm/ee372/esekf-v2-20MHz/accelerator"
-build_target="build-v2-final"
+base_dir="/home/users/yuchenm/ee372/kairos-v2-10MHz/accelerator"
+build_target="build"
 
 # gds_path="$base_dir/$build_target/*-gdsmerge/design_merged.gds"
 gds_path="$base_dir/$build_target/*-signoff/outputs/design-merged.gds"
@@ -22,6 +22,7 @@ def_file="./def/$top.def.gz"
 gl_file="./verilog/gl/$top.v"
 rtl_file="./verilog/rtl/$top.v"
 spi_file="./spi/lvs/$top.spice"
+spef_file="./spef/$top.spef.gz"
 
 # Remove old files
 if [ -f $gds_file ]; then
