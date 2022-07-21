@@ -1,71 +1,58 @@
 #!/bin/bash
 
-# Setting paths
+while getopts ":p:" opt; do
+  case $opt in
+    p)
+      build_dir=$OPTARG
+      echo "Build directory: $build_dir" >&2
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      exit 1
+      ;;
+  esac
+done
+
 top="user_proj_example"
-base_dir="/home/users/yuchenm/ee372/kairos-v2-10MHz/accelerator"
-build_target="build"
 
-# gds_path="$base_dir/$build_target/*-gdsmerge/design_merged.gds"
-gds_path="$base_dir/$build_target/*-signoff/outputs/design-merged.gds"
-lef_path="$base_dir/$build_target/*-signoff/outputs/design.lef"
-def_path="$base_dir/$build_target/*-signoff/outputs/design.def.gz"
-gl_path="$base_dir/$build_target/*-signoff/outputs/design.vcs.v"
-rtl_path="/farmshare/scratch/users/yuchenm/kairos-caravel/verilog/rtl_kairos/kairos_top.v"
-# rtl_path="$base_dir/$build_target/6-rtl/outputs/design.v"
-spi_path="$base_dir/$build_target/*-gds2spice/outputs/design_extracted.spice"
+gds_src="$build_dir/21-cadence-innovus-signoff/outputs/design-merged.gds"
+lef_src="$build_dir/21-cadence-innovus-signoff/outputs/design.lef"
+def_src="$build_dir/21-cadence-innovus-signoff/outputs/design.def.gz"
+rtl_src="/scratch/users/jeffreyy/kairos-caravel/verilog/rtl_kairos/kairos_top.v"
+gl_src="$build_dir/21-cadence-innovus-signoff/outputs/design.vcs.v"
+spef_src="$build_dir/21-cadence-innovus-signoff/outputs/design.spef.gz"
+# spi_src="$build_dir/*-gds2spice/outputs/design_extracted.spice"
 
-# Create file names
+gds_dest="./gds/$top.gds"
+lef_dest="./lef/$top.lef"
+def_dest="./def/$top.def.gz"
+rtl_dest="./verilog/rtl/$top.v"
+gl_dest="./verilog/gl/$top.v"
+spef_dest="./spef/$top.spef.gz"
+# spi_dest="./spi/lvs/$top.spice"
 
-gds_file="./gds/$top.gds"
-lef_file="./lef/$top.lef"
-def_file="./def/$top.def.gz"
-gl_file="./verilog/gl/$top.v"
-rtl_file="./verilog/rtl/$top.v"
-spi_file="./spi/lvs/$top.spice"
-spef_file="./spef/$top.spef.gz"
+echo "Copying $gds_src to $gds_dest"
+cp $gds_src $gds_dest
+echo "Copying $lef_src to $lef_dest"
+cp $lef_src $lef_dest
+echo "Copying $def_src to $def_dest"
+cp $def_src $def_dest
+echo "Copying $gl_src to $gl_dest"
+cp $gl_src $gl_dest
+echo "Copying $rtl_src to $rtl_dest"
+cp $rtl_src $rtl_dest
+echo "Copying $spef_src to $spef_dest"
+cp $spef_src $spef_dest
+# echo "Copying $spi_src to $spi_dest"
+# cp $spi_src $spi_dest
 
-# Remove old files
-if [ -f $gds_file ]; then
-      rm -rf $gds_file
-      echo "Removed existing $gds_file"
-fi
-if [ -f $lef_file ]; then
-      rm -rf $lef_file
-      echo "Removed existing $lef_file"
-fi
-if [ -f $def_file ]; then
-      rm -rf $def_file
-      echo "Removed existing $def_file"
-fi
-if [ -f $gl_file ]; then
-      rm -rf $gl_file
-      echo "Removed existing $gl_file"
-fi
-if [ -f $rtl_file ]; then
-      rm -rf $rtl_file
-      echo "Removed existing $rtl_file"
-fi
-#if [ -f $spi_file ]; then
-#    rm -rf $spi_file
-#    echo "Removed existing $spi_file"
-#fi
+echo "Decompressing $def_dest"
+gunzip $def_dest
+echo "Decompressing $spef_dest"
+gunzip $spef_dest
 
-# Moving files
-echo "Moving $gds_path to $gds_file"
-cp $gds_path $gds_file
-echo "Moving $lef_path to $lef_file"
-cp $lef_path $lef_file
-echo "Moving $def_path to $def_file"
-cp $def_path $def_file
-echo "Moving $gl_path to $gl_file"
-cp $gl_path $gl_file
-echo "Moving $rtl_path to $rtl_file"
-cp $rtl_path $rtl_file
-#echo "Moving $spi_path to $spi_file"
-#cp $spi_path $spi_file
-
-#unzip .gz files
-echo "gunzip $def_file"
-gunzip $def_file
-
-cp $base_dir/$build_target/7-sram/outputs/sky130_sram_1kbyte_1rw1r_32x256_8.lef /farmshare/scratch/users/yuchenm/kairos-caravel/lef/
+cp $build_dir/7-sram/outputs/sky130_sram_1kbyte_1rw1r_32x256_8.lef /farmshare/scratch/users/jeffreyy/kairos-caravel/lef/

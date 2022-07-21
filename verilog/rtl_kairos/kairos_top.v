@@ -1,197 +1,3 @@
-module user_proj_example #(
-    parameter BITS = 32
-) (
-`ifdef USE_POWER_PINS
-    inout vccd1,    // User area 1 1.8V supply
-    inout vssd1,    // User area 1 digital ground
-`endif
-
-    // Wishbone Slave ports (WB MI A)
-    input wire wb_clk_i,
-    input wire wb_rst_i,
-    input wire wbs_stb_i,
-    input wire wbs_cyc_i,
-    input wire wbs_we_i,
-    input wire [3:0] wbs_sel_i,
-    input wire [31:0] wbs_dat_i,
-    input wire [31:0] wbs_adr_i,
-    output wire wbs_ack_o,
-    output wire [31:0] wbs_dat_o,
-
-    // Logic Analyzer Signals
-    input  wire [127:0] la_data_in,
-    output wire [127:0] la_data_out,
-    input  wire [127:0] la_oenb,
-
-    // IOs
-    input  wire [`MPRJ_IO_PADS-1:0] io_in,
-    output wire [`MPRJ_IO_PADS-1:0] io_out,
-    output wire [`MPRJ_IO_PADS-1:0] io_oeb,
-
-    // Analog (direct connection to GPIO pad---use with caution)
-    // Note that analog I/O is not available on the 7 lowest-numbered
-    // GPIO pads, and so the analog_io indexing is offset from the
-    // GPIO indexing by 7 (also upper 2 GPIOs do not have analog_io).
-    inout wire [`MPRJ_IO_PADS-10:0] analog_io,
-
-    // Independent clock (on independent integer divider)
-    input wire user_clock2,
-
-    // User maskable interrupt signals
-    output wire [2:0] user_irq
-);
-
-    wire        io_clk;
-    reg         io_rst_n;
-    wire        input_rdy_o;
-    wire        input_vld_i;
-    wire [15:0] input_data_i;
-    wire        output_rdy_i;
-    wire        output_vld_o;
-    wire [15:0] output_data_o;
-
-    assign user_irq = 3'b0;
-
-    assign io_clk        = io_in[37];
-    // assign io_rst_n      = io_in[36];
-    assign input_data_i  = io_in[15:0];
-    assign input_vld_i   = io_in[16];
-    assign output_rdy_i  = io_in[17];
-
-    assign io_out[17:0]  = 18'b0;
-    assign io_out[33:18] = output_data_o;
-    assign io_out[34]    = output_vld_o;
-    assign io_out[35]    = input_rdy_o;
-    assign io_out[37:36] = 2'b0;
-
-    // input - 1 output - 0
-    assign io_oeb[17:0]  = {18{1'b1}};
-    assign io_oeb[35:18] = 18'b0;
-    assign io_oeb[37:36] = {2{1'b1}};
-
-    assign la_data_out = 128'd0;
-
-// ==============================================================================
-// Wishbone control
-// ==============================================================================
-
-    wire        wbs_debug;
-    wire        wbs_fsm_start;
-    wire        wbs_fsm_done;
-
-    wire        wbs_debug_synced;
-    wire        wbs_fsm_start_synced;
-    wire        wbs_fsm_done_synced;
-
-    wire        wbs_mem_we;
-    wire        wbs_mem_re;
-    wire [11:0] wbs_mem_addr;
-    wire [31:0] wbs_mem_wdata;
-    wire [31:0] wbs_mem_rdata;
-
-    wire user_proj_clk;
-    wire user_proj_rst_n;
-
-    reg wb_rst_r;
-
-    clock_mux #(2) clk_mux (
-        .clk        ( {io_clk, wb_clk_i}        ),
-        .clk_select ( wbs_debug ? 2'b01 : 2'b10 ),
-        .clk_out    ( user_proj_clk             )
-    );
-
-    always @(posedge user_proj_clk) begin
-        io_rst_n     <= io_in[36];
-        wb_rst_r     <= wb_rst_i;
-        // input_data_i <= io_in[15:0];
-        // input_vld_i  <= io_in[16];
-        // output_rdy_i <= io_in[17];
-    end
-
-    assign user_proj_rst_n = wbs_debug_synced ? ~wb_rst_r : io_rst_n;
-
-    wishbone_ctl wbs_ctl_u0 (
-        // wishbone input
-        .wb_clk_i      (wb_clk_i            ),
-        .wb_rst_i      (wb_rst_i            ),
-        .wbs_stb_i     (wbs_stb_i           ),
-        .wbs_cyc_i     (wbs_cyc_i           ),
-        .wbs_we_i      (wbs_we_i            ),
-        .wbs_sel_i     (wbs_sel_i           ),
-        .wbs_dat_i     (wbs_dat_i           ),
-        .wbs_adr_i     (wbs_adr_i           ),
-        // wishbone output
-        .wbs_ack_o     (wbs_ack_o           ),
-        .wbs_dat_o     (wbs_dat_o           ),
-        // output
-        .wbs_debug     (wbs_debug           ),
-        .wbs_fsm_start (wbs_fsm_start       ),
-        .wbs_fsm_done  (wbs_fsm_done_synced ),
-
-        .wbs_mem_we    (wbs_mem_we          ),
-        .wbs_mem_re    (wbs_mem_re          ),
-        .wbs_mem_addr  (wbs_mem_addr        ),
-        .wbs_mem_wdata (wbs_mem_wdata       ),
-        .wbs_mem_rdata (wbs_mem_rdata       )
-    );
-
-// ==============================================================================
-// IO Logic
-// ==============================================================================
-
-    accelerator acc_inst (
-        .clk           (user_proj_clk       ),
-        .rst_n         (user_proj_rst_n     ),
-
-        .input_rdy     (input_rdy_o         ),
-        .input_vld     (input_vld_i         ),
-        .input_data    (input_data_i        ),
-
-        .output_rdy    (output_rdy_i        ),
-        .output_vld    (output_vld_o        ),
-        .output_data   (output_data_o       ),
-
-        .wbs_debug     (wbs_debug_synced    ),
-        .wbs_fsm_start (wbs_fsm_start_synced),
-        .wbs_fsm_done  (wbs_fsm_done        ),
-
-        .wbs_mem_we    (wbs_mem_we          ),
-        .wbs_mem_re    (wbs_mem_re          ),
-        .wbs_mem_addr  (wbs_mem_addr        ),
-        .wbs_mem_wdata (wbs_mem_wdata       ),
-        .wbs_mem_rdata (wbs_mem_rdata       )
-    );
-
-    SyncBit wbs_debug_sync (
-        .sCLK          (wb_clk_i            ),
-        .sRST          (~wb_rst_i           ),
-        .dCLK          (user_proj_clk       ),
-        .sEN           (1'b1                ),
-        .sD_IN         (wbs_debug           ),
-        .dD_OUT        (wbs_debug_synced    )
-    );
-
-    SyncPulse wbs_fsm_start_sync (
-        .sCLK          (wb_clk_i            ),
-        .sRST          (~wb_rst_i           ),
-        .dCLK          (user_proj_clk       ),
-        .sEN           (wbs_fsm_start       ),
-        .dPulse        (wbs_fsm_start_synced)
-    );
-
-    SyncBit wbs_fsm_done_sync (
-        .sCLK          (io_clk              ),
-        .sRST          (io_rst_n            ),
-        .dCLK          (wb_clk_i            ),
-        .sEN           (1'b1                ),
-        .sD_IN         (wbs_fsm_done        ),
-        .dD_OUT        (wbs_fsm_done_synced )
-    );
-
-endmodule
-
-`default_nettype wire
-
 module DW_fp_dp4_inst_pipe (
 	inst_clk,
 	inst_a,
@@ -334,7 +140,7 @@ module DW_fp_mac_DG_inst_pipe (
 		inst_b_reg <= inst_b;
 		inst_c_reg <= inst_c;
 		inst_DG_ctrl_reg <= inst_DG_ctrl;
-		z_inst_pipe1 <= (status_inst_internal[2] ? 0 : z_inst_internal);
+		z_inst_pipe1 <= (status_inst_internal[2] ? {((SIG_WIDTH + EXP_WIDTH) >= 0 ? (SIG_WIDTH + EXP_WIDTH) + 1 : 1 - (SIG_WIDTH + EXP_WIDTH)) {1'sb0}} : z_inst_internal);
 		z_inst_pipe2 <= z_inst_pipe1;
 		z_inst_pipe3 <= z_inst_pipe2;
 		z_inst_pipe4 <= z_inst_pipe3;
@@ -752,6 +558,7 @@ endmodule
 module accelerator (
 	clk,
 	rst_n,
+	wb_clk_i,
 	input_data,
 	input_rdy,
 	input_vld,
@@ -781,6 +588,7 @@ module accelerator (
 	parameter DATA_MEM_ADDR_WIDTH = $clog2(DATA_MEM_BANK_DEPTH);
 	input wire clk;
 	input wire rst_n;
+	input wire wb_clk_i;
 	input wire [INPUT_FIFO_WIDTH - 1:0] input_data;
 	output wire input_rdy;
 	input wire input_vld;
@@ -793,13 +601,11 @@ module accelerator (
 	input wire wbs_mem_we;
 	input wire wbs_mem_re;
 	input wire [11:0] wbs_mem_addr;
-	input wire [31:0] wbs_mem_wdata;
-	output wire [31:0] wbs_mem_rdata;
+	input wire [DATAPATH - 1:0] wbs_mem_wdata;
+	output wire [DATAPATH - 1:0] wbs_mem_rdata;
 	localparam DATA_WIDTH = (SIG_WIDTH + EXP_WIDTH) + 1;
 	localparam ADDR_WIDTH = 12;
 	wire [INPUT_FIFO_WIDTH - 1:0] input_fifo_dout;
-	wire params_fifo_deq;
-	wire instr_fifo_deq;
 	wire input_fifo_deq;
 	wire input_fifo_empty_n;
 	wire input_rdy_w;
@@ -807,6 +613,9 @@ module accelerator (
 	wire output_fifo_enq;
 	wire output_fifo_full_n;
 	wire output_vld_w;
+	wire input_fifo_deq_params;
+	wire input_fifo_deq_instr;
+	wire input_fifo_deq_data;
 	wire instr_wen;
 	wire input_wen;
 	wire output_wb_ren;
@@ -817,19 +626,18 @@ module accelerator (
 	wire [DATA_MEM_ADDR_WIDTH - 1:0] input_wadr;
 	wire [DATA_MEM_ADDR_WIDTH - 1:0] output_wb_radr;
 	wire mat_inv_en;
-	wire mat_inv_vld;
 	wire mvp_core_en;
 	wire mvp_mem_we;
 	wire mvp_mem_re;
 	wire [11:0] mvp_mem_addr;
 	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] mvp_mem_wdata;
 	wire [2:0] width;
+	wire [INSTR_MEM_ADDR_WIDTH - 1:0] pc;
 	reg instr_mem_csb;
 	reg instr_mem_web;
 	reg [INSTR_MEM_ADDR_WIDTH - 1:0] instr_mem_addr;
-	reg [DATA_WIDTH - 1:0] instr_mem_wdata;
-	wire [DATA_WIDTH - 1:0] instr_mem_rdata;
-	wire [INSTR_MEM_ADDR_WIDTH - 1:0] pc;
+	reg [31:0] instr_mem_wdata;
+	wire [31:0] instr_mem_rdata;
 	wire [31:0] instr;
 	reg data_mem_csb;
 	reg data_mem_web;
@@ -847,15 +655,28 @@ module accelerator (
 	wire instr_mem_ctrl_csb;
 	wire instr_mem_ctrl_web;
 	wire [INSTR_MEM_ADDR_WIDTH - 1:0] instr_mem_ctrl_addr;
-	wire [DATA_WIDTH - 1:0] instr_mem_ctrl_wdata;
+	wire [31:0] instr_mem_ctrl_wdata;
 	wire data_mem_ctrl_csb;
 	wire data_mem_ctrl_web;
 	wire [(DATAPATH / 32) - 1:0] data_mem_ctrl_wmask;
 	wire [DATA_MEM_ADDR_WIDTH - 1:0] data_mem_ctrl_addr;
 	wire [DATAPATH - 1:0] data_mem_ctrl_wdata;
-	wire mat_inv_vld_out;
-	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_out_l;
-	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_out_u;
+	wire wbs_rst_n;
+	wire mat_inv_en_sync;
+	wire mat_inv_vld_i;
+	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_in;
+	wire mat_inv_vld_o;
+	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_l_o;
+	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_u_o;
+	wire mat_inv_in_enq;
+	wire mat_inv_in_vld;
+	wire mat_inv_out_enq;
+	wire mat_inv_l_vld;
+	wire mat_inv_u_vld;
+	wire mat_inv_out_vld;
+	wire [(9 * DATA_WIDTH) - 1:0] mem_wdata_flatten;
+	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_l_sync;
+	wire [(9 * DATA_WIDTH) - 1:0] mat_inv_u_sync;
 	wire [31:0] instr_aggregator_dout;
 	wire [DATAPATH - 1:0] input_aggregator_dout;
 	mvp_core #(
@@ -877,16 +698,9 @@ module accelerator (
 		.mem_rdata(mem_ctrl_rdata),
 		.width(width)
 	);
-	mat_inv #(.DATA_WIDTH(DATA_WIDTH)) mat_inv_inst(
-		.clk(clk),
-		.rst_n(rst_n),
-		.en(mat_inv_en),
-		.vld(mat_inv_vld),
-		.mat_in(mvp_mem_wdata[0+:DATA_WIDTH * 9]),
-		.vld_out(mat_inv_vld_out),
-		.mat_inv_out_l(mat_inv_out_l),
-		.mat_inv_out_u(mat_inv_out_u)
-	);
+	assign mat_inv_out_vld = 1'b1;
+	assign mat_inv_u_sync = 'b0;
+	assign mat_inv_l_sync = 'b0;
 	ram_sync_1rw1r #(
 		.DATA_WIDTH(32),
 		.ADDR_WIDTH(INSTR_MEM_ADDR_WIDTH),
@@ -919,6 +733,36 @@ module accelerator (
 		.addr1(output_wb_radr),
 		.dout1(output_wb_data)
 	);
+	memory_controller #(
+		.ADDR_WIDTH(ADDR_WIDTH),
+		.DATA_WIDTH(DATA_WIDTH),
+		.VECTOR_LANES(VECTOR_LANES),
+		.DATAPATH(DATAPATH),
+		.INSTR_MEM_ADDR_WIDTH(INSTR_MEM_ADDR_WIDTH),
+		.DATA_MEM_ADDR_WIDTH(DATA_MEM_ADDR_WIDTH)
+	) mem_ctrl_inst(
+		.clk(clk),
+		.mem_we(mem_ctrl_we),
+		.mem_re(mem_ctrl_re),
+		.mem_addr(mem_ctrl_addr),
+		.mem_wdata(mem_ctrl_wdata),
+		.mem_rdata(mem_ctrl_rdata),
+		.width(mem_ctrl_width),
+		.instr_mem_csb(instr_mem_ctrl_csb),
+		.instr_mem_web(instr_mem_ctrl_web),
+		.instr_mem_addr(instr_mem_ctrl_addr),
+		.instr_mem_wdata(instr_mem_ctrl_wdata),
+		.instr_mem_rdata(instr_mem_rdata),
+		.data_mem_csb(data_mem_ctrl_csb),
+		.data_mem_web(data_mem_ctrl_web),
+		.data_mem_addr(data_mem_ctrl_addr),
+		.data_mem_wmask(data_mem_ctrl_wmask),
+		.data_mem_wdata(data_mem_ctrl_wdata),
+		.data_mem_rdata(data_mem_rdata),
+		.mat_inv_out_l(mat_inv_l_sync),
+		.mat_inv_out_u(mat_inv_u_sync)
+	);
+	assign wbs_mem_rdata = mem_ctrl_rdata;
 	always @(*)
 		if (instr_wen) begin
 			instr_mem_csb = instr_wen;
@@ -962,36 +806,6 @@ module accelerator (
 			mem_ctrl_wdata = mvp_mem_wdata;
 			mem_ctrl_width = width;
 		end
-	memory_controller #(
-		.ADDR_WIDTH(ADDR_WIDTH),
-		.DATA_WIDTH(DATA_WIDTH),
-		.VECTOR_LANES(VECTOR_LANES),
-		.DATAPATH(DATAPATH),
-		.INSTR_MEM_ADDR_WIDTH(INSTR_MEM_ADDR_WIDTH),
-		.DATA_MEM_ADDR_WIDTH(DATA_MEM_ADDR_WIDTH)
-	) mem_ctrl_inst(
-		.clk(clk),
-		.mem_we(mem_ctrl_we),
-		.mem_re(mem_ctrl_re),
-		.mem_addr(mem_ctrl_addr),
-		.mem_wdata(mem_ctrl_wdata),
-		.mem_rdata(mem_ctrl_rdata),
-		.width(mem_ctrl_width),
-		.instr_mem_csb(instr_mem_ctrl_csb),
-		.instr_mem_web(instr_mem_ctrl_web),
-		.instr_mem_addr(instr_mem_ctrl_addr),
-		.instr_mem_wdata(instr_mem_ctrl_wdata),
-		.instr_mem_rdata(instr_mem_rdata),
-		.data_mem_csb(data_mem_ctrl_csb),
-		.data_mem_web(data_mem_ctrl_web),
-		.data_mem_addr(data_mem_ctrl_addr),
-		.data_mem_wmask(data_mem_ctrl_wmask),
-		.data_mem_wdata(data_mem_ctrl_wdata),
-		.data_mem_rdata(data_mem_rdata),
-		.mat_inv_out_l(mat_inv_out_l),
-		.mat_inv_out_u(mat_inv_out_u)
-	);
-	assign wbs_mem_rdata = mem_ctrl_rdata;
 	fifo #(
 		.DATA_WIDTH(INPUT_FIFO_WIDTH),
 		.FIFO_DEPTH(3),
@@ -1000,14 +814,15 @@ module accelerator (
 		.clk(clk),
 		.rst_n(rst_n),
 		.din(input_data),
-		.enq(input_rdy_w && input_vld),
+		.enq(input_rdy_w & input_vld),
 		.full_n(input_rdy_w),
 		.dout(input_fifo_dout),
-		.deq((params_fifo_deq | instr_fifo_deq) | input_fifo_deq),
+		.deq(input_fifo_deq),
 		.empty_n(input_fifo_empty_n),
 		.clr(1'b0)
 	);
 	assign input_rdy = input_rdy_w;
+	assign input_fifo_deq = (input_fifo_deq_params | input_fifo_deq_instr) | input_fifo_deq_data;
 	aggregator #(
 		.DATA_WIDTH(INPUT_FIFO_WIDTH),
 		.FETCH_WIDTH(32 / INPUT_FIFO_WIDTH)
@@ -1016,7 +831,7 @@ module accelerator (
 		.rst_n(rst_n),
 		.sender_data(input_fifo_dout),
 		.sender_empty_n(input_fifo_empty_n),
-		.sender_deq(instr_fifo_deq),
+		.sender_deq(input_fifo_deq_instr),
 		.receiver_data(instr_aggregator_dout),
 		.receiver_full_n(instr_full_n),
 		.receiver_enq(instr_wen)
@@ -1029,7 +844,7 @@ module accelerator (
 		.rst_n(rst_n),
 		.sender_data(input_fifo_dout),
 		.sender_empty_n(input_fifo_empty_n),
-		.sender_deq(input_fifo_deq),
+		.sender_deq(input_fifo_deq_data),
 		.receiver_data(input_aggregator_dout),
 		.receiver_full_n(input_full_n),
 		.receiver_enq(input_wen)
@@ -1076,7 +891,7 @@ module accelerator (
 		.wbs_fsm_start(wbs_fsm_start),
 		.wbs_fsm_done(wbs_fsm_done),
 		.params_fifo_dout(input_fifo_dout),
-		.params_fifo_deq(params_fifo_deq),
+		.params_fifo_deq(input_fifo_deq_params),
 		.params_fifo_empty_n(input_fifo_empty_n),
 		.instr_full_n(instr_full_n),
 		.input_full_n(input_full_n),
@@ -1091,8 +906,7 @@ module accelerator (
 		.mem_read(mvp_mem_re),
 		.mem_write(mvp_mem_we),
 		.mat_inv_en(mat_inv_en),
-		.mat_inv_vld(mat_inv_vld),
-		.mat_inv_vld_out(mat_inv_vld_out),
+		.mat_inv_out_vld(mat_inv_out_vld),
 		.mvp_core_en(mvp_core_en)
 	);
 endmodule
@@ -1236,8 +1050,7 @@ module controller (
 	mem_read,
 	mem_write,
 	mat_inv_en,
-	mat_inv_vld,
-	mat_inv_vld_out,
+	mat_inv_out_vld,
 	mvp_core_en
 );
 	parameter INPUT_FIFO_WIDTH = 16;
@@ -1268,8 +1081,7 @@ module controller (
 	input wire mem_read;
 	input wire mem_write;
 	output reg mat_inv_en;
-	output wire mat_inv_vld;
-	input wire mat_inv_vld_out;
+	input wire mat_inv_out_vld;
 	output reg mvp_core_en;
 	localparam IO_ADDR = 12'ha00;
 	localparam INVMAT_ADDR = 12'ha02;
@@ -1284,7 +1096,6 @@ module controller (
 	reg [ADDR_WIDTH - 1:0] instr_wadr_r;
 	reg [ADDR_WIDTH - 1:0] input_wadr_r;
 	reg [ADDR_WIDTH - 1:0] output_wbadr_r;
-	reg mat_inv_en_r;
 	assign instr_wadr = instr_wadr_r;
 	assign input_wadr = input_wadr_r[3+:DATA_MEM_ADDR_WIDTH];
 	assign output_wb_radr = output_wbadr_r[3+:DATA_MEM_ADDR_WIDTH];
@@ -1292,12 +1103,6 @@ module controller (
 	assign instr_full_n = (~wbs_debug & (state_r == 1)) & (instr_wadr_r <= instr_max_wadr_c);
 	assign input_full_n = (~wbs_debug & (state_r == 3)) & (input_wadr_r <= (input_wadr_offset + input_max_wadr_c));
 	assign output_empty_n = (~wbs_debug & (state_r == 3)) & (output_wbadr_r <= (output_radr_offset + output_max_adr_c));
-	assign mat_inv_vld = mat_inv_en && ~mat_inv_en_r;
-	always @(posedge clk)
-		if (!rst_n)
-			mat_inv_en_r <= 0;
-		else
-			mat_inv_en_r <= mat_inv_en;
 	assign wbs_fsm_done = state_r == 3;
 	always @(posedge clk)
 		if (~rst_n) begin
@@ -1339,7 +1144,7 @@ module controller (
 				mvp_core_en <= 0;
 				mat_inv_en <= 1;
 			end
-			else if (mat_inv_en_r && mat_inv_vld_out) begin
+			else if (mat_inv_en && mat_inv_out_vld) begin
 				mvp_core_en <= 1;
 				mat_inv_en <= 0;
 			end
@@ -1348,8 +1153,8 @@ module controller (
 			input_wadr_r <= (input_wen && input_full_n ? input_wadr_r + 8 : input_wadr_r);
 			output_wbadr_r <= (output_wb_ren && output_empty_n ? output_wbadr_r + 8 : output_wbadr_r);
 			if ((input_wadr_r >= (input_wadr_offset + input_max_wadr_c)) && (output_wbadr_r >= (output_radr_offset + output_max_adr_c))) begin
-				mvp_core_en <= 1;
 				state_r <= 2;
+				mvp_core_en <= 1;
 			end
 			if (wbs_debug && wbs_fsm_start) begin
 				state_r <= 2;
@@ -1622,6 +1427,18 @@ module dot_product_unit (
 			);
 		end
 	endgenerate
+endmodule
+module edge_detector (
+	sig,
+	clk,
+	pe
+);
+	input wire sig;
+	input wire clk;
+	output wire pe;
+	reg sig_r;
+	always @(posedge clk) sig_r <= sig;
+	assign pe = sig & ~sig_r;
 endmodule
 module fpu (
 	inst_a,
@@ -2018,7 +1835,7 @@ module memory_controller (
 	assign instr_mem_wdata = mem_wdata;
 	assign data_mem_addr = mem_addr[3+:DATA_MEM_ADDR_WIDTH];
 	assign data_mem_wmask = mem_write_mask << mem_addr[2:0];
-	assign data_mem_wdata = mem_wdata << {mem_addr[2:0], 5'b00000};
+	assign data_mem_wdata = mem_wdata;
 	always @(*) begin
 		instr_mem_csb = 1'b0;
 		instr_mem_web = 1'b0;
@@ -2042,7 +1859,7 @@ module memory_controller (
 		endcase
 	always @(*)
 		if ((mem_addr_r & DATA_MASK) == DATA_ADDR)
-			mem_rdata = data_mem_rdata >> {mem_addr[2:0], 5'b00000};
+			mem_rdata = data_mem_rdata;
 		else if ((mem_addr_r & TEXT_MASK) == TEXT_ADDR)
 			mem_rdata = instr_mem_rdata;
 		else if (mem_addr_r == INVMAT_L_ADDR)
@@ -2072,10 +1889,11 @@ module mvp_core (
 	parameter EXP_WIDTH = 8;
 	parameter IEEE_COMPLIANCE = 0;
 	parameter VECTOR_LANES = 16;
-	parameter DATA_WIDTH = (SIG_WIDTH + EXP_WIDTH) + 1;
+	parameter DATAPATH = 256;
 	parameter INSTR_MEM_ADDR_WIDTH = 8;
 	parameter REG_BANK_DEPTH = 32;
 	localparam REG_ADDR_WIDTH = $clog2(REG_BANK_DEPTH);
+	localparam DATA_WIDTH = (SIG_WIDTH + EXP_WIDTH) + 1;
 	input wire clk;
 	input wire rst_n;
 	input wire en;
@@ -2091,7 +1909,31 @@ module mvp_core (
 	output wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] data_out;
 	output wire [4:0] reg_wb;
 	reg en_q;
+	wire pipe_en;
 	wire stall;
+	wire jump_id;
+	wire pc_sel;
+	wire branch_id;
+	reg branch_ex1;
+	reg branch_ex2;
+	wire reg_we_id;
+	reg reg_we_ex1;
+	reg reg_we_ex2;
+	reg reg_we_ex3;
+	reg reg_we_ex4;
+	reg reg_we_wb;
+	wire mem_we_id;
+	reg mem_we_ex1;
+	wire [4:0] opcode_id;
+	reg [4:0] opcode_ex1;
+	wire [2:0] funct3_id;
+	reg [2:0] funct3_ex1;
+	wire [4:0] wb_sel_id;
+	reg [4:0] wb_sel_ex1;
+	reg [4:0] wb_sel_ex2;
+	reg [4:0] wb_sel_ex3;
+	reg [4:0] wb_sel_ex4;
+	reg [4:0] wb_sel_wb;
 	wire [4:0] vd_addr_id;
 	reg [4:0] vd_addr_ex1;
 	reg [4:0] vd_addr_ex2;
@@ -2104,75 +1946,60 @@ module mvp_core (
 	reg [4:0] vs2_addr_ex1;
 	wire [4:0] vs3_addr_id;
 	reg [4:0] vs3_addr_ex1;
+	wire [11:0] mem_addr_id;
+	reg [11:0] mem_addr_ex1;
+	reg [11:0] mem_addr_ex2;
+	wire [11:0] instr_addr;
 	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vs1_data_id;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vs1_data_ex1;
 	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vs2_data_id;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vs2_data_ex1;
 	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vs3_data_id;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vs3_data_ex1;
-	wire [DATA_WIDTH - 1:0] rs1_data_id;
-	wire [DATA_WIDTH - 1:0] rs2_data_id;
-	wire [DATA_WIDTH - 1:0] rs3_data_id;
-	wire [4:0] opcode_id;
-	reg [4:0] opcode_ex1;
-	wire [2:0] funct3_id;
-	reg [2:0] funct3_ex1;
-	wire [4:0] wb_sel_id;
-	reg [4:0] wb_sel_ex1;
-	reg [4:0] wb_sel_ex2;
-	reg [4:0] wb_sel_ex3;
-	reg [4:0] wb_sel_ex4;
-	reg [4:0] wb_sel_wb;
-	wire reg_we_id;
-	reg reg_we_ex1;
-	reg reg_we_ex2;
-	reg reg_we_ex3;
-	reg reg_we_ex4;
-	reg reg_we_wb;
-	wire mem_we_id;
-	reg mem_we_ex1;
-	wire [11:0] mem_addr_id;
-	reg [11:0] mem_addr_ex1;
-	reg [11:0] mem_addr_ex2;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] operand_a;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] operand_b;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] operand_c;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata_ex3;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata_ex4;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] mem_rdata_wb;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_ex2;
+	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_ex3;
+	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_ex4;
+	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_wb;
+	wire [DATA_WIDTH - 1:0] mfu_out_ex4;
+	reg [DATA_WIDTH - 1:0] mfu_out_wb;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vfu_out_ex4;
+	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vfu_out_wb;
+	wire [(9 * DATA_WIDTH) - 1:0] mat_out_wb;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage2_forward;
+	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage3_forward;
+	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage4_forward;
 	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] reg_wdata_wb;
-	wire jump_id;
-	wire [INSTR_MEM_ADDR_WIDTH - 1:0] jump_addr_id;
-	wire [INSTR_MEM_ADDR_WIDTH - 1:0] jump_addr_ex2;
-	wire pc_sel;
-	wire branch_id;
-	reg branch_ex1;
-	reg branch_ex2;
 	assign data_out = reg_wdata_wb;
 	assign data_out_vld = en && reg_we_wb;
 	assign reg_wb = vd_addr_wb;
-	wire pipe_en;
-	assign pipe_en = en && (en_q || (pc != 0));
-	always @(posedge clk) begin
-		en_q <= en;
-		if (data_out_vld) begin
-			begin : sv2v_autoblock_1
-				reg signed [31:0] i;
-				for (i = 8; i >= 0; i = i - 1)
-					$write("%h_", reg_wdata_wb[i * DATA_WIDTH+:DATA_WIDTH]);
-			end
-			$display;
-		end
-	end
-	instruction_fetch #(.ADDR_WIDTH(INSTR_MEM_ADDR_WIDTH)) if_stage(
+	always @(posedge clk) en_q <= en;
+	assign pipe_en = en & (en_q | (pc != 0));
+	// always @(posedge clk)
+	// 	if (data_out_vld) begin
+	// 		begin : sv2v_autoblock_1
+	// 			reg signed [31:0] i;
+	// 			for (i = 8; i >= 0; i = i - 1)
+	// 				$write("%h_", reg_wdata_wb[i * DATA_WIDTH+:DATA_WIDTH]);
+	// 		end
+	// 		$display;
+	// 	end
+	instruction_fetch #(.ADDR_WIDTH(12)) if_stage(
 		.clk(clk),
 		.rst_n(rst_n),
 		.en(en & ~stall),
 		.branch(pc_sel),
-		.branch_offset(jump_addr_ex2),
+		.branch_offset(mem_addr_ex2),
 		.jump(jump_id),
-		.jump_addr(jump_addr_id),
-		.pc(pc)
+		.jump_addr(mem_addr_id),
+		.pc(instr_addr)
 	);
-	assign jump_addr_id = mem_addr_id[INSTR_MEM_ADDR_WIDTH - 1:0];
-	assign jump_addr_ex2 = mem_addr_ex2[INSTR_MEM_ADDR_WIDTH - 1:0];
+	assign pc = instr_addr;
 	decoder decoder_inst(
 		.instr(instr),
 		.vd_addr(vd_addr_id),
@@ -2215,22 +2042,6 @@ module mvp_core (
 		.addr_r3(vs3_addr_id),
 		.data_r3(vs3_data_id)
 	);
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] operand_a;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] operand_b;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] operand_c;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_ex2;
-	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_ex3;
-	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_ex4;
-	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vec_out_wb;
-	wire [DATA_WIDTH - 1:0] mfu_out_ex4;
-	reg [DATA_WIDTH - 1:0] mfu_out_wb;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] vfu_out_ex4;
-	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] vfu_out_wb;
-	wire [(9 * DATA_WIDTH) - 1:0] mat_out_wb;
-	wire [7:0] status_inst;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage2_forward;
-	wire [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage3_forward;
-	reg [(VECTOR_LANES * DATA_WIDTH) - 1:0] stage4_forward;
 	assign stage2_forward = vec_out_ex2;
 	assign stage3_forward = (wb_sel_ex3[0] ? vec_out_ex3 : mem_rdata_ex3);
 	always @(*)
@@ -2239,7 +2050,7 @@ module mvp_core (
 			5'b00010: stage4_forward = mem_rdata_ex4;
 			5'b00100: stage4_forward = vfu_out_ex4;
 			5'b01000: stage4_forward = mfu_out_ex4;
-			default: stage4_forward = 1'sb0;
+			default: stage4_forward = 1'sbx;
 		endcase
 	assign pc_sel = branch_ex2 && vec_out_ex2[0+:DATA_WIDTH];
 	assign operand_a = (((vs1_addr_ex1 == vd_addr_ex2) && reg_we_ex2) && wb_sel_ex2[0] ? stage2_forward : (((vs1_addr_ex1 == vd_addr_ex3) && reg_we_ex3) && |wb_sel_ex3[1:0] ? stage3_forward : (((vs1_addr_ex1 == vd_addr_ex4) && reg_we_ex4) && ~wb_sel_ex4[4] ? stage4_forward : ((vs1_addr_ex1 == vd_addr_wb) && reg_we_wb ? reg_wdata_wb : vs1_data_ex1))));
@@ -2290,8 +2101,7 @@ module mvp_core (
 		.inst_func(funct3_ex1),
 		.inst_rnd(3'b000),
 		.inst_DG_ctrl(wb_sel_ex1[3]),
-		.z_inst(mfu_out_ex4),
-		.status_inst(status_inst)
+		.z_inst(mfu_out_ex4)
 	);
 	dot_product_unit #(
 		.SIG_WIDTH(SIG_WIDTH),
@@ -2310,8 +2120,8 @@ module mvp_core (
 		.vec_out(mat_out_wb)
 	);
 	assign mem_addr = mem_addr_ex1;
-	assign mem_write = mem_we_ex1 && en;
-	assign mem_read = wb_sel_ex1[1] && en;
+	assign mem_write = mem_we_ex1 & en;
+	assign mem_read = wb_sel_ex1[1] & en;
 	assign mem_wdata = operand_c;
 	assign width = funct3_ex1;
 	always @(*)
@@ -2321,10 +2131,10 @@ module mvp_core (
 			5'b00100: reg_wdata_wb = vfu_out_wb;
 			5'b01000: reg_wdata_wb = mfu_out_wb;
 			5'b10000: reg_wdata_wb = mat_out_wb;
-			default: reg_wdata_wb = 1'sb0;
+			default: reg_wdata_wb = 1'sbx;
 		endcase
 	always @(posedge clk)
-		if (~rst_n) begin
+		if (!rst_n) begin
 			vs1_addr_ex1 <= 1'sb0;
 			vs2_addr_ex1 <= 1'sb0;
 			vs3_addr_ex1 <= 1'sb0;
@@ -2791,7 +2601,7 @@ module vfpu (
 			wire [7:0] status_inst;
 			wire [DATA_WIDTH - 1:0] b_neg;
 			wire [DATA_WIDTH - 1:0] c_neg;
-			wire [EXP_WIDTH + SIG_WIDTH:0] one;
+			wire [DATA_WIDTH - 1:0] one;
 			wire [EXP_WIDTH - 1:0] one_exp;
 			wire [SIG_WIDTH - 1:0] one_sig;
 			assign one_exp = (1 << (EXP_WIDTH - 1)) - 1;
@@ -2914,7 +2724,7 @@ module vslide_down (
 	assign slide8down = (shamt[3] ? {{8 {32'b00000000000000000000000000000000}}, vsrc[DATA_WIDTH * 8+:DATA_WIDTH * 8]} : vsrc);
 	assign slide4down = (shamt[2] ? {{4 {32'b00000000000000000000000000000000}}, slide8down[DATA_WIDTH * 4+:DATA_WIDTH * 12]} : slide8down);
 	assign slide2down = (shamt[1] ? {{2 {32'b00000000000000000000000000000000}}, slide4down[DATA_WIDTH * 2+:DATA_WIDTH * 14]} : slide4down);
-	assign slide1down = (shamt[0] ? {32'b00000000000000000000000000000000, slide2down[DATA_WIDTH * 1+:DATA_WIDTH * 15]} : slide2down);
+	assign slide1down = (shamt[0] ? {32'b00000000000000000000000000000000, slide2down[DATA_WIDTH+:DATA_WIDTH * 15]} : slide2down);
 	assign mask0 = 16'hffff;
 	assign mask1 = (shamt[3] ? {8'b00000000, mask0[15:8]} : mask0);
 	assign mask2 = (shamt[2] ? {4'b0000, mask1[15:4]} : mask1);
@@ -2984,7 +2794,7 @@ module wishbone_ctl (
 	wbs_mem_wdata,
 	wbs_mem_rdata
 );
-	parameter WISHBONE_BASE_ADDR = 32'h30000000;
+	parameter DATAPATH = 256;
 	input wire wb_clk_i;
 	input wire wb_rst_i;
 	input wire wbs_stb_i;
@@ -2994,27 +2804,42 @@ module wishbone_ctl (
 	input wire [31:0] wbs_dat_i;
 	input wire [31:0] wbs_adr_i;
 	output reg wbs_ack_o;
-	output reg [31:0] wbs_dat_o;
+	output wire [31:0] wbs_dat_o;
 	output reg wbs_debug;
 	output reg wbs_fsm_start;
 	input wire wbs_fsm_done;
 	output reg wbs_mem_we;
 	output reg wbs_mem_re;
-	output wire [11:0] wbs_mem_addr;
-	output reg [31:0] wbs_mem_wdata;
-	input wire [31:0] wbs_mem_rdata;
+	output reg [11:0] wbs_mem_addr;
+	output wire [DATAPATH - 1:0] wbs_mem_wdata;
+	input wire [DATAPATH - 1:0] wbs_mem_rdata;
 	localparam WBS_DEBUG_ADDR = 32'h30000000;
 	localparam WBS_FSM_START_ADDR = 32'h30000004;
 	localparam WBS_FSM_DONE_ADDR = 32'h30000008;
 	localparam WBS_MEM_MASK = 32'hffff0000;
 	localparam WBS_MEM_ADDR = 32'h30010000;
+	localparam DATA_MEM_MASK = 12'h800;
+	localparam DATA_MEM_ADDR = 12'h000;
+	localparam TEXT_MEM_MASK = 12'he00;
+	localparam TEXT_MEM_ADDR = 12'h800;
 	reg [2:0] state;
 	reg [2:0] next_state;
+	wire wbs_req;
+	wire wbs_mem_write;
+	wire wbs_mem_read;
+	reg mem_rdata_shift;
+	reg mem_wdata_shift;
+	wire wbs_fsm_done_rd;
 	reg [31:0] wbs_adr_r1;
 	reg [31:0] wbs_adr_r2;
-	reg [31:0] wbs_read_data;
-	wire wbs_req;
+	reg [DATAPATH - 1:0] mem_write_data;
+	reg [DATAPATH - 1:0] mem_write_data_shifted;
+	reg [DATAPATH - 1:0] mem_read_data;
+	reg [DATAPATH - 1:0] mem_read_data_shifted;
 	assign wbs_req = wbs_stb_i & wbs_cyc_i;
+	assign wbs_mem_write = wbs_req & wbs_we_i;
+	assign wbs_mem_read = wbs_req & !wbs_we_i;
+	assign wbs_fsm_done_rd = wbs_adr_r1 == WBS_FSM_DONE_ADDR;
 	always @(posedge wb_clk_i)
 		if (wb_rst_i)
 			state <= 3'd0;
@@ -3024,35 +2849,47 @@ module wishbone_ctl (
 		next_state = state;
 		wbs_mem_we = 0;
 		wbs_mem_re = 0;
+		wbs_mem_addr = 0;
 		wbs_ack_o = 0;
+		mem_wdata_shift = 0;
+		mem_rdata_shift = 0;
 		case (state)
 			3'd0: begin
-				if (wbs_req & wbs_we_i)
+				if (wbs_mem_write & ((wbs_adr_i & WBS_MEM_MASK) == WBS_MEM_ADDR))
+					next_state = 3'd5;
+				else if (wbs_mem_write)
+					next_state = 3'd7;
+				if (wbs_mem_read & ((wbs_adr_i & WBS_MEM_MASK) == WBS_MEM_ADDR))
+					next_state = 3'd1;
+				else if (wbs_mem_read)
 					next_state = 3'd4;
-				if (wbs_req & ~wbs_we_i)
-					if ((wbs_adr_i & WBS_MEM_MASK) == WBS_MEM_ADDR)
-						next_state = 3'd1;
-					else
-						next_state = 3'd2;
 			end
 			3'd1: begin
 				next_state = 3'd2;
 				wbs_mem_re = 1;
+				wbs_mem_addr = wbs_adr_r1[13:2];
 			end
-			3'd2: begin
-				next_state = 3'd3;
-				if (wbs_adr_r1 == WBS_FSM_DONE_ADDR)
-					wbs_read_data = wbs_fsm_done;
-				else if ((wbs_adr_r2 & WBS_MEM_MASK) == WBS_MEM_ADDR)
-					wbs_read_data = wbs_mem_rdata;
-			end
+			3'd2: next_state = 3'd3;
 			3'd3: begin
-				next_state = 3'd0;
-				wbs_ack_o = 1'b1;
+				next_state = 3'd4;
+				mem_rdata_shift = 1;
 			end
 			3'd4: begin
 				next_state = 3'd0;
-				wbs_mem_we = (wbs_adr_r1 & WBS_MEM_MASK) == WBS_MEM_ADDR;
+				wbs_ack_o = 1'b1;
+			end
+			3'd5: begin
+				next_state = 3'd6;
+				mem_wdata_shift = 1;
+			end
+			3'd6: begin
+				next_state = 3'd0;
+				wbs_mem_we = 1;
+				wbs_mem_addr = wbs_adr_r2[13:2];
+				wbs_ack_o = 1'b1;
+			end
+			3'd7: begin
+				next_state = 3'd0;
 				wbs_ack_o = 1'b1;
 			end
 		endcase
@@ -3060,32 +2897,50 @@ module wishbone_ctl (
 	always @(posedge wb_clk_i)
 		if (wb_rst_i)
 			wbs_debug <= 0;
-		else if ((wbs_req & wbs_we_i) & (wbs_adr_i == WBS_DEBUG_ADDR))
+		else if (wbs_mem_write & (wbs_adr_i == WBS_DEBUG_ADDR))
 			wbs_debug <= wbs_dat_i[0];
 	always @(posedge wb_clk_i)
 		if (wb_rst_i)
 			wbs_fsm_start <= 0;
-		else if ((wbs_req & wbs_we_i) & (wbs_adr_i == WBS_FSM_START_ADDR))
+		else if (wbs_mem_write & (wbs_adr_i == WBS_FSM_START_ADDR))
 			wbs_fsm_start <= wbs_dat_i[0];
 		else
 			wbs_fsm_start <= 0;
 	always @(posedge wb_clk_i)
 		if (wb_rst_i)
-			wbs_mem_wdata <= 32'b00000000000000000000000000000000;
-		else if (wbs_req && ((wbs_adr_i & WBS_MEM_MASK) == WBS_MEM_ADDR))
-			wbs_mem_wdata <= wbs_dat_i;
+			mem_write_data <= 32'b00000000000000000000000000000000;
+		else if (wbs_mem_write && ((wbs_adr_i & WBS_MEM_MASK) == WBS_MEM_ADDR))
+			mem_write_data <= wbs_dat_i;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			mem_write_data_shifted <= 32'b00000000000000000000000000000000;
+		else if (mem_wdata_shift & ((wbs_adr_r1[13:2] & DATA_MEM_MASK) == DATA_MEM_ADDR))
+			mem_write_data_shifted <= mem_write_data << {wbs_adr_r1[4:2], 5'b00000};
+		else if (mem_wdata_shift)
+			mem_write_data_shifted <= mem_write_data;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			mem_read_data <= 32'b00000000000000000000000000000000;
+		else if (state == 3'd2)
+			mem_read_data <= wbs_mem_rdata;
+	always @(posedge wb_clk_i)
+		if (wb_rst_i)
+			mem_read_data_shifted <= 32'b00000000000000000000000000000000;
+		else if (mem_rdata_shift & ((wbs_adr_r2[13:2] & DATA_MEM_MASK) == DATA_MEM_ADDR))
+			mem_read_data_shifted <= mem_read_data >> {wbs_adr_r2[4:2], 5'b00000};
+		else if (mem_rdata_shift)
+			mem_read_data_shifted <= mem_read_data;
 	always @(posedge wb_clk_i)
 		if (wb_rst_i) begin
 			wbs_adr_r1 <= 0;
 			wbs_adr_r2 <= 0;
-			wbs_dat_o <= 32'b00000000000000000000000000000000;
 		end
 		else begin
 			wbs_adr_r1 <= wbs_adr_i;
 			wbs_adr_r2 <= wbs_adr_r1;
-			wbs_dat_o <= wbs_read_data;
 		end
-	assign wbs_mem_addr = wbs_adr_r1[13:2];
+	assign wbs_mem_wdata = mem_write_data_shifted;
+	assign wbs_dat_o = (wbs_fsm_done_rd ? wbs_fsm_done : mem_read_data_shifted);
 endmodule
 module SizedFIFO (
 	CLK,
@@ -3226,6 +3081,173 @@ module SyncBit (
 		dSyncReg2 = init;
 	end
 endmodule
+module SyncFIFO (
+	sCLK,
+	sRST,
+	dCLK,
+	sENQ,
+	sD_IN,
+	sFULL_N,
+	dDEQ,
+	dD_OUT,
+	dEMPTY_N
+);
+	parameter dataWidth = 1;
+	parameter depth = 2;
+	parameter indxWidth = 1;
+	input sCLK;
+	input sRST;
+	input sENQ;
+	input [dataWidth - 1:0] sD_IN;
+	output wire sFULL_N;
+	input dCLK;
+	input dDEQ;
+	output wire dEMPTY_N;
+	output wire [dataWidth - 1:0] dD_OUT;
+	wire [indxWidth:0] msbset = ~({indxWidth + 1 {1'b1}} >> 1);
+	wire [indxWidth - 1:0] msb2set = ~({indxWidth {1'b1}} >> 1);
+	wire [indxWidth:0] msb12set = msbset | {1'b0, msb2set};
+	reg [dataWidth - 1:0] fifoMem [0:depth - 1];
+	reg [dataWidth - 1:0] dDoutReg;
+	reg [indxWidth + 1:0] sGEnqPtr;
+	reg [indxWidth + 1:0] sGEnqPtr1;
+	reg sNotFullReg;
+	wire sNextNotFull;
+	wire sFutureNotFull;
+	reg [indxWidth + 1:0] dGDeqPtr;
+	reg [indxWidth + 1:0] dGDeqPtr1;
+	reg dNotEmptyReg;
+	wire dNextNotEmpty;
+	wire dRST;
+	reg [indxWidth:0] dSyncReg1;
+	reg [indxWidth:0] dEnqPtr;
+	reg [indxWidth:0] sSyncReg1;
+	reg [indxWidth:0] sDeqPtr;
+	wire [indxWidth - 1:0] sEnqPtrIndx;
+	wire [indxWidth - 1:0] dDeqPtrIndx;
+	assign dRST = sRST;
+	assign dD_OUT = dDoutReg;
+	assign dEMPTY_N = dNotEmptyReg;
+	assign sFULL_N = sNotFullReg;
+	assign sEnqPtrIndx = sGEnqPtr[indxWidth - 1:0];
+	assign dDeqPtrIndx = dGDeqPtr[indxWidth - 1:0];
+	always @(posedge sCLK)
+		if (sENQ)
+			fifoMem[sEnqPtrIndx] <= sD_IN;
+	assign sNextNotFull = (sGEnqPtr[indxWidth + 1:1] ^ msb12set) != sDeqPtr;
+	assign sFutureNotFull = (sGEnqPtr1[indxWidth + 1:1] ^ msb12set) != sDeqPtr;
+	function [indxWidth:0] incrGray;
+		input [indxWidth:0] grayin;
+		input parity;
+		begin : incrGrayBlock
+			integer i;
+			reg [indxWidth:0] tempshift;
+			reg [indxWidth:0] flips;
+			flips[0] = !parity;
+			for (i = 1; i < indxWidth; i = i + 1)
+				begin
+					tempshift = grayin << ((2 + indxWidth) - i);
+					flips[i] = (parity & grayin[i - 1]) & ~(|tempshift);
+				end
+			tempshift = grayin << 2;
+			flips[indxWidth] = parity & ~(|tempshift);
+			incrGray = flips ^ grayin;
+		end
+	endfunction
+	function [indxWidth + 1:0] incrGrayP;
+		input [indxWidth + 1:0] grayPin;
+		begin : incrGrayPBlock
+			reg [indxWidth:0] g;
+			reg p;
+			reg [indxWidth:0] i;
+			g = grayPin[indxWidth + 1:1];
+			p = grayPin[0];
+			i = incrGray(g, p);
+			incrGrayP = {i, ~p};
+		end
+	endfunction
+	always @(posedge sCLK or negedge sRST)
+		if (sRST == 1'b0) begin
+			sGEnqPtr <= {indxWidth + 2 {1'b0}};
+			sGEnqPtr1 <= {{indxWidth {1'b0}}, 2'b11};
+			sNotFullReg <= 1'b0;
+		end
+		else if (sENQ) begin
+			sGEnqPtr1 <= incrGrayP(sGEnqPtr1);
+			sGEnqPtr <= sGEnqPtr1;
+			sNotFullReg <= sFutureNotFull;
+		end
+		else
+			sNotFullReg <= sNextNotFull;
+	always @(posedge dCLK or negedge dRST)
+		if (dRST == 1'b0) begin
+			dSyncReg1 <= {indxWidth + 1 {1'b0}};
+			dEnqPtr <= {indxWidth + 1 {1'b0}};
+		end
+		else begin
+			dSyncReg1 <= sGEnqPtr[indxWidth + 1:1];
+			dEnqPtr <= dSyncReg1;
+		end
+	assign dNextNotEmpty = dGDeqPtr[indxWidth + 1:1] != dEnqPtr;
+	always @(posedge dCLK or negedge dRST)
+		if (dRST == 1'b0) begin
+			dGDeqPtr <= {indxWidth + 2 {1'b0}};
+			dGDeqPtr1 <= {{indxWidth {1'b0}}, 2'b11};
+			dNotEmptyReg <= 1'b0;
+		end
+		else if ((!dNotEmptyReg || dDEQ) && dNextNotEmpty) begin
+			dGDeqPtr <= dGDeqPtr1;
+			dGDeqPtr1 <= incrGrayP(dGDeqPtr1);
+			dNotEmptyReg <= 1'b1;
+		end
+		else if (dDEQ && !dNextNotEmpty)
+			dNotEmptyReg <= 1'b0;
+	always @(posedge dCLK)
+		if ((!dNotEmptyReg || dDEQ) && dNextNotEmpty)
+			dDoutReg <= fifoMem[dDeqPtrIndx];
+	always @(posedge sCLK or negedge sRST)
+		if (sRST == 1'b0) begin
+			sSyncReg1 <= {indxWidth + 1 {1'b0}};
+			sDeqPtr <= {indxWidth + 1 {1'b0}};
+		end
+		else begin
+			sSyncReg1 <= dGDeqPtr[indxWidth + 1:1];
+			sDeqPtr <= sSyncReg1;
+		end
+	initial begin : initBlock
+		integer i;
+		for (i = 0; i < depth; i = i + 1)
+			fifoMem[i] = {(dataWidth + 1) / 2 {2'b10}};
+		dDoutReg = {(dataWidth + 1) / 2 {2'b10}};
+		sGEnqPtr = {(indxWidth + 2) / 2 {2'b10}};
+		sGEnqPtr1 = sGEnqPtr;
+		sNotFullReg = 1'b0;
+		dGDeqPtr = sGEnqPtr;
+		dGDeqPtr1 = sGEnqPtr;
+		dNotEmptyReg = 1'b0;
+		sSyncReg1 = sGEnqPtr;
+		sDeqPtr = sGEnqPtr;
+		dSyncReg1 = sGEnqPtr;
+		dEnqPtr = sGEnqPtr;
+	end
+	// initial begin : parameter_assertions
+	// 	integer ok;
+	// 	integer i;
+	// 	integer expDepth;
+	// 	ok = 1;
+	// 	expDepth = 1;
+	// 	for (i = 0; i < indxWidth; i = i + 1)
+	// 		expDepth = expDepth * 2;
+	// 	if (expDepth != depth) begin
+	// 		ok = 0;
+	// 		$display("ERROR SyncFiFO.v: index size and depth do not match;");
+	// 		$display("\tdepth must equal 2 ** index size. expected %0d", expDepth);
+	// 	end
+	// 	#(0)
+	// 		if (ok == 0)
+	// 			$finish;
+	// end
+endmodule
 module SyncPulse (
 	sCLK,
 	sRST,
@@ -3264,6 +3286,29 @@ module SyncPulse (
 		dSyncReg1 = 1'b0;
 		dSyncReg2 = 1'b0;
 		dSyncPulse = 1'b0;
+	end
+endmodule
+module SyncResetA (
+	IN_RST,
+	CLK,
+	OUT_RST
+);
+	parameter RSTDELAY = 1;
+	input CLK;
+	input IN_RST;
+	output wire OUT_RST;
+	reg [RSTDELAY:0] reset_hold;
+	wire [RSTDELAY + 1:0] next_reset = {reset_hold, ~1'b0};
+	assign OUT_RST = reset_hold[RSTDELAY];
+	always @(posedge CLK or negedge IN_RST)
+		if (IN_RST == 1'b0)
+			reset_hold <= {RSTDELAY + 1 {1'b0}};
+		else
+			reset_hold <= next_reset[RSTDELAY:0];
+	initial begin
+		#(0)
+			;
+		reset_hold = {RSTDELAY + 1 {~1'b0}};
 	end
 endmodule
 module aggregator (
@@ -3427,3 +3472,224 @@ module fifo (
 	);
 endmodule
 `default_nettype none
+`define MPRJ_IO_PADS 38
+
+module user_proj_example #(
+    parameter BITS = 32
+) (
+`ifdef USE_POWER_PINS
+    inout vccd1,	// User area 1 1.8V supply
+    inout vssd1,	// User area 1 digital ground
+`endif
+
+    // Wishbone Slave ports (WB MI A)
+    input  wire                     wb_clk_i,
+    input  wire                     wb_rst_i,
+    input  wire                     wbs_stb_i,
+    input  wire                     wbs_cyc_i,
+    input  wire                     wbs_we_i,
+    input  wire               [3:0] wbs_sel_i,
+    input  wire              [31:0] wbs_dat_i,
+    input  wire              [31:0] wbs_adr_i,
+    output wire                     wbs_ack_o,
+    output wire              [31:0] wbs_dat_o,
+
+    // Logic Analyzer Signals
+    input  wire             [127:0] la_data_in,
+    output wire             [127:0] la_data_out,
+    input  wire             [127:0] la_oenb,
+
+    // IOs
+    input  wire [`MPRJ_IO_PADS-1:0] io_in,
+    output wire [`MPRJ_IO_PADS-1:0] io_out,
+    output wire [`MPRJ_IO_PADS-1:0] io_oeb,
+
+    // Analog (direct connection to GPIO pad---use with caution)
+    // Note that analog I/O is not available on the 7 lowest-numbered
+    // GPIO pads, and so the analog_io indexing is offset from the
+    // GPIO indexing by 7 (also upper 2 GPIOs do not have analog_io).
+    inout wire [`MPRJ_IO_PADS-10:0] analog_io,
+
+    // Independent clock (on independent integer divider)
+    input wire                      user_clock2,
+
+    // User maskable interrupt signals
+    output wire               [2:0] user_irq
+);
+
+    wire         io_clk;
+    reg          io_rst_n;
+    reg          wb_rst_n;
+    wire         rst_n_mux;
+    wire         user_proj_clk;
+    wire         user_proj_rst_n;
+
+    wire         input_rdy_o;
+    wire         input_vld_i;
+    wire  [15:0] input_data_i;
+
+    wire         output_rdy_i;
+    wire         output_vld_o;
+    wire  [15:0] output_data_o;
+
+    wire         wbs_debug;
+    wire         wbs_fsm_start;
+    wire         wbs_fsm_done;
+
+    wire         sync_wbs_debug;
+    wire         sync_wbs_fsm_start;
+    wire         sync_wbs_fsm_done;
+
+    wire         wbs_mem_we;
+    wire         wbs_mem_re;
+    wire  [11:0] wbs_mem_addr;
+    wire [255:0] wbs_mem_wdata;
+    wire [255:0] wbs_mem_rdata;
+
+    assign io_clk        = io_in[37];
+    assign input_data_i  = io_in[15:0];
+    assign input_vld_i   = io_in[16];
+    assign output_rdy_i  = io_in[17];
+
+    assign io_out[17:0]  = 18'b0;
+    assign io_out[33:18] = output_data_o;
+    assign io_out[34]    = output_vld_o;
+    assign io_out[35]    = input_rdy_o;
+    assign io_out[37:36] = 2'b0;
+
+    // input - 1 output - 0
+    assign io_oeb[17:0]  = {18{1'b1}};
+    assign io_oeb[35:18] = 18'b0;
+    assign io_oeb[37:36] = {2{1'b1}};
+
+    assign la_data_out   = 128'd0;
+    assign user_irq      = 3'b0;
+
+// ==============================================================================
+// Clock mux and reset signal
+// ==============================================================================
+
+    clock_mux #(2) clk_mux (
+        .clk        ( {io_clk, wb_clk_i}        ),
+        .clk_select ( wbs_debug ? 2'b01 : 2'b10 ),
+        .clk_out    ( user_proj_clk             )
+    );
+
+    always @(posedge io_clk)   io_rst_n <= io_in[36];
+    always @(posedge wb_clk_i) wb_rst_n <= ~wb_rst_i;
+
+    wire sync_io_rst_n;
+    wire sync_wb_rst_n;
+
+    SyncBit io_rst_n_inst (
+        .sCLK          ( io_clk             ),
+        .sRST          ( io_rst_n           ),
+        .dCLK          ( user_proj_clk      ),
+        .sEN           ( 1'b1               ),
+        .sD_IN         ( io_rst_n           ),
+        .dD_OUT        ( sync_io_rst_n      )
+    );
+
+    SyncBit wbs_rst_n_inst (
+        .sCLK          ( wb_clk_i           ),
+        .sRST          ( wb_rst_n           ),
+        .dCLK          ( user_proj_clk      ),
+        .sEN           ( 1'b1               ),
+        .sD_IN         ( wb_rst_n           ),
+        .dD_OUT        ( sync_wb_rst_n      )
+    );
+
+    assign user_proj_rst_n = sync_wbs_debug ? sync_wb_rst_n : sync_io_rst_n;
+
+    // assign rst_n_mux = wbs_debug ? wb_rst_n : io_rst_n;
+    // assign rst_n_mux = wbs_debug ? wb_rst_n : io_in[36];
+
+    // SyncResetA #(0) usr_rst_synca_inst (.CLK(user_proj_clk), .IN_RST(rst_n_mux), .OUT_RST(user_proj_rst_n));
+    // SyncResetA #(0) wb_rst_synca_inst  (.CLK(wb_clk_i     ), .IN_RST(~wb_rst_i), .OUT_RST(wb_rst_n       ));
+
+// ==============================================================================
+// Wishbone control
+// ==============================================================================
+
+    wishbone_ctl wbs_ctl_u0 (
+        // wishbone input
+        .wb_clk_i      ( wb_clk_i           ),
+        .wb_rst_i      ( wb_rst_i           ),
+        .wbs_stb_i     ( wbs_stb_i          ),
+        .wbs_cyc_i     ( wbs_cyc_i          ),
+        .wbs_we_i      ( wbs_we_i           ),
+        .wbs_sel_i     ( wbs_sel_i          ),
+        .wbs_dat_i     ( wbs_dat_i          ),
+        .wbs_adr_i     ( wbs_adr_i          ),
+        // wishbone output
+        .wbs_ack_o     ( wbs_ack_o          ),
+        .wbs_dat_o     ( wbs_dat_o          ),
+        // output
+        .wbs_debug     ( wbs_debug          ),
+        .wbs_fsm_start ( wbs_fsm_start      ),
+        .wbs_fsm_done  ( sync_wbs_fsm_done  ),
+
+        .wbs_mem_we    ( wbs_mem_we         ),
+        .wbs_mem_re    ( wbs_mem_re         ),
+        .wbs_mem_addr  ( wbs_mem_addr       ),
+        .wbs_mem_wdata ( wbs_mem_wdata      ),
+        .wbs_mem_rdata ( wbs_mem_rdata      )
+    );
+
+// ==============================================================================
+// IO Logic
+// ==============================================================================
+
+    accelerator acc_inst (
+        .clk           ( user_proj_clk      ),
+        .rst_n         ( user_proj_rst_n    ),
+        .wb_clk_i      ( wb_clk_i           ),
+
+        .input_rdy     ( input_rdy_o        ),
+        .input_vld     ( input_vld_i        ),
+        .input_data    ( input_data_i       ),
+
+        .output_rdy    ( output_rdy_i       ),
+        .output_vld    ( output_vld_o       ),
+        .output_data   ( output_data_o      ),
+
+        .wbs_debug     ( sync_wbs_debug     ),
+        .wbs_fsm_start ( sync_wbs_fsm_start ),
+        .wbs_fsm_done  ( wbs_fsm_done       ),
+
+        .wbs_mem_we    ( wbs_mem_we         ),
+        .wbs_mem_re    ( wbs_mem_re         ),
+        .wbs_mem_addr  ( wbs_mem_addr       ),
+        .wbs_mem_wdata ( wbs_mem_wdata      ),
+        .wbs_mem_rdata ( wbs_mem_rdata      )
+    );
+
+    SyncBit wbs_debug_inst (
+        .sCLK          ( wb_clk_i           ),
+        .sRST          ( wb_rst_n           ),
+        .dCLK          ( user_proj_clk      ),
+        .sEN           ( 1'b1               ),
+        .sD_IN         ( wbs_debug          ),
+        .dD_OUT        ( sync_wbs_debug     )
+    );
+
+    SyncPulse wbs_fsm_start_inst (
+        .sCLK          ( wb_clk_i           ),
+        .sRST          ( wb_rst_n           ),
+        .dCLK          ( user_proj_clk      ),
+        .sEN           ( wbs_fsm_start      ),
+        .dPulse        ( sync_wbs_fsm_start )
+    );
+
+    SyncBit wbs_fsm_done_inst (
+        .sCLK          ( user_proj_clk      ),
+        .sRST          ( user_proj_rst_n    ),
+        .dCLK          ( wb_clk_i           ),
+        .sEN           ( 1'b1               ),
+        .sD_IN         ( wbs_fsm_done       ),
+        .dD_OUT        ( sync_wbs_fsm_done  )
+    );
+
+endmodule
+
+`default_nettype wire
