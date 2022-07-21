@@ -23,7 +23,7 @@ gds_src="$build_dir/21-cadence-innovus-signoff/outputs/design-merged.gds"
 lef_src="$build_dir/21-cadence-innovus-signoff/outputs/design.lef"
 def_src="$build_dir/21-cadence-innovus-signoff/outputs/design.def.gz"
 rtl_src="/scratch/users/jeffreyy/kairos-caravel/verilog/rtl_kairos/kairos_top.v"
-gl_src="$build_dir/21-cadence-innovus-signoff/outputs/design.vcs.v"
+gl_src="$build_dir/21-cadence-innovus-signoff/outputs/design.virtuoso.v"
 spef_src="$build_dir/21-cadence-innovus-signoff/outputs/design.spef.gz"
 # spi_src="$build_dir/*-gds2spice/outputs/design_extracted.spice"
 
